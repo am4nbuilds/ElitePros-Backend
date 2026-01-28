@@ -1,5 +1,4 @@
 import express from "express";
-import fetch from "node-fetch";
 import cors from "cors";
 
 const app = express();
@@ -8,14 +7,12 @@ const app = express();
    🔥 CORS — MUST BE FIRST
    =============================== */
 app.use(cors({
-  origin: "*", // allow Netlify, localhost, etc.
+  origin: "*",
   methods: ["GET", "POST", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization"]
 }));
 
-// Handle preflight requests explicitly
 app.options("*", cors());
-
 app.use(express.json());
 
 /* ===============================
@@ -40,8 +37,11 @@ app.post("/create-payment", async (req, res) => {
       return res.status(400).json({ error: "Invalid request" });
     }
 
-    const zapupiResponse = await fetch(
-      "https://www.zapupi.com/api/create-payment",
+    console.log("➡️ Creating payment:", { amount, userId });
+
+    // ✅ Use native fetch (Node 18+ on Render)
+    const response = await fetch(
+      "https://api.zapupi.com/api/v1/payment",
       {
         method: "POST",
         headers: {
@@ -50,7 +50,7 @@ app.post("/create-payment", async (req, res) => {
           "x-secret-key": process.env.ZAPUPI_SECRET_KEY
         },
         body: JSON.stringify({
-          amount: amount,
+          amount,
           currency: "INR",
           redirect_url: "https://imaginative-lolly-654a8a.netlify.app/success.html",
           webhook_url: "https://elitepros-backend.onrender.com/webhook/zapupi",
@@ -59,19 +59,43 @@ app.post("/create-payment", async (req, res) => {
       }
     );
 
-    const data = await zapupiResponse.json();
+    // 🔥 Read raw response first (critical for debugging)
+    const rawText = await response.text();
+    console.log("⬅️ Zapupi raw response:", rawText);
 
-    if (!data.payment_url) {
-      console.error("Zapupi error:", data);
-      return res.status(500).json({ error: "Payment creation failed" });
+    let data;
+    try {
+      data = JSON.parse(rawText);
+    } catch (e) {
+      return res.status(500).json({
+        error: "Zapupi returned non-JSON response",
+        raw: rawText
+      });
     }
 
-    // 🔥 FRONTEND EXPECTS THIS
+    if (!response.ok) {
+      return res.status(500).json({
+        error: "Zapupi API error",
+        zapupi: data
+      });
+    }
+
+    if (!data.payment_url) {
+      return res.status(500).json({
+        error: "payment_url missing in Zapupi response",
+        zapupi: data
+      });
+    }
+
+    // ✅ SUCCESS
     res.json({ url: data.payment_url });
 
   } catch (err) {
-    console.error("Server error:", err);
-    res.status(500).json({ error: "Server error" });
+    console.error("🔥 CREATE-PAYMENT CRASH:", err);
+    res.status(500).json({
+      error: "Server error",
+      details: err.message
+    });
   }
 });
 
