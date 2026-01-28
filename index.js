@@ -37,8 +37,9 @@ app.post("/create-payment", async (req, res) => {
       return res.status(400).json({ error: "Invalid request" });
     }
 
-    // Generate unique order ID
-    const orderId = `ORD_${Date.now()}_${userId.slice(0, 6)}`;
+    // Generate Zapupi-safe order ID
+const orderId =
+  "ORD" + Math.floor(100000000 + Math.random() * 900000000);
 
     // 🔥 Build x-www-form-urlencoded body
     const formBody = new URLSearchParams({
