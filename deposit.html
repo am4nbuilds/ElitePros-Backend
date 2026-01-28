@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html>
+<body>
+
+<input id="amount" type="number" value="10" />
+<button onclick="pay()">Pay</button>
+
+<script>
+async function pay() {
+  const res = await fetch(
+    "https://elitepros-backend.onrender.com/create-payment",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        amount: 10,
+        userId: "kNABqZe4O7Pj1UuagQ7n3887zB62"
+      })
+    }
+  );
+
+  const data = await res.json();
+  console.log(data);
+
+  if (data.url) {
+    window.location.href = data.url;
+  } else {
+    alert("Failed");
+  }
+}
+</script>
+
+</body>
+</html>
