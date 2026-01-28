@@ -4,19 +4,19 @@ import cors from "cors";
 const app = express();
 
 /* ===============================
-   🔥 CORS — MUST BE FIRST
+   🔥 CORS
    =============================== */
 app.use(cors({
   origin: "*",
   methods: ["GET", "POST", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"]
+  allowedHeaders: ["Content-Type"]
 }));
-
 app.options("*", cors());
+
 app.use(express.json());
 
 /* ===============================
-   ✅ ROOT TEST ROUTE
+   ✅ ROOT TEST
    =============================== */
 app.get("/", (req, res) => {
   res.json({
@@ -27,7 +27,7 @@ app.get("/", (req, res) => {
 });
 
 /* ===============================
-   💳 CREATE PAYMENT (Zapupi)
+   💳 CREATE ORDER (Zapupi)
    =============================== */
 app.post("/create-payment", async (req, res) => {
   try {
@@ -37,61 +37,58 @@ app.post("/create-payment", async (req, res) => {
       return res.status(400).json({ error: "Invalid request" });
     }
 
-    console.log("➡️ Creating payment:", { amount, userId });
+    // Generate unique order ID
+    const orderId = `ORD_${Date.now()}_${userId.slice(0, 6)}`;
 
-    // ✅ Use native fetch (Node 18+ on Render)
+    // 🔥 Build x-www-form-urlencoded body
+    const formBody = new URLSearchParams({
+      token_key: process.env.ZAPUPI_API_KEY,
+      secret_key: process.env.ZAPUPI_SECRET_KEY,
+      amount: amount.toString(),
+      order_id: orderId,
+      customer_mobile: "9999999999", // optional
+      remark: "Wallet Deposit"
+    });
+
     const response = await fetch(
-      "https://api.zapupi.com/api/v1/payment",
+      "https://api.zapupi.com/api/create-order",
       {
         method: "POST",
         headers: {
-          "Content-Type": "application/json",
-          "x-api-key": process.env.ZAPUPI_API_KEY,
-          "x-secret-key": process.env.ZAPUPI_SECRET_KEY
+          "Content-Type": "application/x-www-form-urlencoded"
         },
-        body: JSON.stringify({
-          amount,
-          currency: "INR",
-          redirect_url: "https://imaginative-lolly-654a8a.netlify.app/success.html",
-          webhook_url: "https://elitepros-backend.onrender.com/webhook/zapupi",
-          meta: { userId }
-        })
+        body: formBody.toString()
       }
     );
 
-    // 🔥 Read raw response first (critical for debugging)
-    const rawText = await response.text();
-    console.log("⬅️ Zapupi raw response:", rawText);
+    const text = await response.text();
+    console.log("Zapupi raw:", text);
 
     let data;
     try {
-      data = JSON.parse(rawText);
-    } catch (e) {
+      data = JSON.parse(text);
+    } catch {
       return res.status(500).json({
-        error: "Zapupi returned non-JSON response",
-        raw: rawText
+        error: "Zapupi returned non-JSON",
+        raw: text
       });
     }
 
-    if (!response.ok) {
+    if (data.status !== "success") {
       return res.status(500).json({
-        error: "Zapupi API error",
+        error: "Zapupi order failed",
         zapupi: data
       });
     }
 
-    if (!data.payment_url) {
-      return res.status(500).json({
-        error: "payment_url missing in Zapupi response",
-        zapupi: data
-      });
-    }
-
-    // ✅ SUCCESS
-    res.json({ url: data.payment_url });
+    // 🔥 Zapupi usually returns a payment URL / QR / intent
+    res.json({
+      order_id: orderId,
+      zapupi: data
+    });
 
   } catch (err) {
-    console.error("🔥 CREATE-PAYMENT CRASH:", err);
+    console.error("CREATE PAYMENT ERROR:", err);
     res.status(500).json({
       error: "Server error",
       details: err.message
