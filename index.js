@@ -1,106 +1,126 @@
 import express from "express";
 import cors from "cors";
+import admin from "firebase-admin";
 
 const app = express();
 
 /* ===============================
    🔥 CORS
-   =============================== */
-app.use(cors({
-  origin: "*",
-  methods: ["GET", "POST", "OPTIONS"],
-  allowedHeaders: ["Content-Type"]
-}));
-app.options("*", cors());
-
+=============================== */
+app.use(cors({ origin: "*" }));
 app.use(express.json());
 
 /* ===============================
-   ✅ ROOT TEST
-   =============================== */
-app.get("/", (req, res) => {
+   🔥 FIREBASE ADMIN
+=============================== */
+admin.initializeApp({
+  credential: admin.credential.cert({
+    projectId: process.env.FB_PROJECT_ID,
+    clientEmail: process.env.FB_CLIENT_EMAIL,
+    privateKey: process.env.FB_PRIVATE_KEY.replace(/\\n/g, "\n")
+  }),
+  databaseURL: process.env.FB_DB_URL
+});
+
+const db = admin.database();
+
+/* ===============================
+   🔥 TEST UID (TEMP)
+=============================== */
+const TEST_UID = "kNABqZe4O7Pj1UuagQ7n3887zB62";
+
+/* ===============================
+   ✅ CREATE ORDER
+=============================== */
+app.post("/create-payment", async (req, res) => {
+  const { amount } = req.body;
+
+  const orderId =
+    "ORD" + Math.floor(100000000 + Math.random() * 900000000);
+
+  const body = new URLSearchParams({
+    token_key: process.env.ZAPUPI_API_KEY,
+    secret_key: process.env.ZAPUPI_SECRET_KEY,
+    amount: amount.toString(),
+    order_id: orderId,
+    remark: "Wallet Deposit"
+  });
+
+  const response = await fetch("https://api.zapupi.com/api/create-order", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: body.toString()
+  });
+
+  const data = await response.json();
+
+  // Save pending transaction
+  await db.ref(`users/${TEST_UID}/transactions/${orderId}`).set({
+    order_id: orderId,
+    amount,
+    status: "PENDING",
+    created_at: Date.now()
+  });
+
   res.json({
-    status: "OK",
-    service: "ElitePros Backend",
-    time: new Date().toISOString()
+    order_id: orderId,
+    payment_url: data.payment_url,
+    auto_check: data.auto_check_every_2_sec
   });
 });
 
 /* ===============================
-   💳 CREATE ORDER (Zapupi)
-   =============================== */
-app.post("/create-payment", async (req, res) => {
-  try {
-    const { amount, userId } = req.body;
+   🔁 AUTO CHECK (WEBHOOK-LIKE)
+=============================== */
+app.post("/check-status", async (req, res) => {
+  const { orderId } = req.body;
 
-    if (!amount || amount < 1 || !userId) {
-      return res.status(400).json({ error: "Invalid request" });
+  const body = new URLSearchParams({
+    token_key: process.env.ZAPUPI_API_KEY,
+    secret_key: process.env.ZAPUPI_SECRET_KEY,
+    order_id: orderId
+  });
+
+  const response = await fetch(
+    "https://api.zapupi.com/api/order-status",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: body.toString()
     }
+  );
 
-    // Generate Zapupi-safe order ID
-const orderId =
-  "ORD" + Math.floor(100000000 + Math.random() * 900000000);
+  const data = await response.json();
 
-    // 🔥 Build x-www-form-urlencoded body
-    const formBody = new URLSearchParams({
-      token_key: process.env.ZAPUPI_API_KEY,
-      secret_key: process.env.ZAPUPI_SECRET_KEY,
-      amount: amount.toString(),
-      order_id: orderId,
-      customer_mobile: "9999999999", // optional
-      remark: "Wallet Deposit"
-    });
-
-    const response = await fetch(
-      "https://api.zapupi.com/api/create-order",
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/x-www-form-urlencoded"
-        },
-        body: formBody.toString()
-      }
-    );
-
-    const text = await response.text();
-    console.log("Zapupi raw:", text);
-
-    let data;
-    try {
-      data = JSON.parse(text);
-    } catch {
-      return res.status(500).json({
-        error: "Zapupi returned non-JSON",
-        raw: text
-      });
-    }
-
-    if (data.status !== "success") {
-      return res.status(500).json({
-        error: "Zapupi order failed",
-        zapupi: data
-      });
-    }
-
-    // 🔥 Zapupi usually returns a payment URL / QR / intent
-    res.json({
-      order_id: orderId,
-      zapupi: data
-    });
-
-  } catch (err) {
-    console.error("CREATE PAYMENT ERROR:", err);
-    res.status(500).json({
-      error: "Server error",
-      details: err.message
-    });
+  if (data.status !== "success") {
+    return res.json({ status: "PENDING" });
   }
+
+  const txnRef = db.ref(
+    `users/${TEST_UID}/transactions/${orderId}`
+  );
+
+  const snap = await txnRef.once("value");
+  if (snap.val()?.status === "SUCCESS") {
+    return res.json({ status: "ALREADY_DONE" });
+  }
+
+  // ✅ Update wallet
+  await db.ref(`users/${TEST_UID}/wallet/deposited`)
+    .transaction(v => (v || 0) + Number(data.amount));
+
+  // ✅ Save transaction
+  await txnRef.update({
+    status: "SUCCESS",
+    utr: data.utr,
+    txn_id: data.txn_id,
+    completed_at: Date.now()
+  });
+
+  res.json({ status: "SUCCESS" });
 });
 
 /* ===============================
    🚀 START SERVER
-   =============================== */
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log("Backend running on port", PORT);
-});
+=============================== */
+app.listen(process.env.PORT || 3000);
