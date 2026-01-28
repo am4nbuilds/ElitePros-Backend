@@ -1,10 +1,26 @@
 import express from "express";
 import fetch from "node-fetch";
+import cors from "cors";
 
 const app = express();
+
+/* ===============================
+   🔥 CORS — MUST BE FIRST
+   =============================== */
+app.use(cors({
+  origin: "*", // allow Netlify, localhost, etc.
+  methods: ["GET", "POST", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"]
+}));
+
+// Handle preflight requests explicitly
+app.options("*", cors());
+
 app.use(express.json());
 
-// ✅ ROOT CHECK (VERY IMPORTANT)
+/* ===============================
+   ✅ ROOT TEST ROUTE
+   =============================== */
 app.get("/", (req, res) => {
   res.json({
     status: "OK",
@@ -13,7 +29,9 @@ app.get("/", (req, res) => {
   });
 });
 
-// ✅ CREATE PAYMENT ROUTE
+/* ===============================
+   💳 CREATE PAYMENT (Zapupi)
+   =============================== */
 app.post("/create-payment", async (req, res) => {
   try {
     const { amount, userId } = req.body;
@@ -34,8 +52,8 @@ app.post("/create-payment", async (req, res) => {
         body: JSON.stringify({
           amount: amount,
           currency: "INR",
-          redirect_url: "https://example.com/success",
-          webhook_url: "https://example.com/webhook/zapupi",
+          redirect_url: "https://imaginative-lolly-654a8a.netlify.app/success.html",
+          webhook_url: "https://elitepros-backend.onrender.com/webhook/zapupi",
           meta: { userId }
         })
       }
@@ -48,7 +66,7 @@ app.post("/create-payment", async (req, res) => {
       return res.status(500).json({ error: "Payment creation failed" });
     }
 
-    // 🔥 THIS IS WHAT FRONTEND EXPECTS
+    // 🔥 FRONTEND EXPECTS THIS
     res.json({ url: data.payment_url });
 
   } catch (err) {
@@ -57,6 +75,9 @@ app.post("/create-payment", async (req, res) => {
   }
 });
 
+/* ===============================
+   🚀 START SERVER
+   =============================== */
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log("Backend running on port", PORT);
