@@ -1,6 +1,7 @@
 import express from "express";
 import cors from "cors";
 import admin from "firebase-admin";
+import fetch from "node-fetch";
 
 /* ===============================
    APP SETUP
@@ -51,9 +52,11 @@ app.post("/create-payment", async (req, res) => {
       return res.status(400).json({ error: "Invalid amount" });
     }
 
-    // Zapupi-safe order id
     const orderId =
       "ORD" + Math.floor(100000000 + Math.random() * 900000000);
+
+    const redirectUrl =
+      "https://imaginative-lolly-654a8a.netlify.app/wallet.html?order_id=" + orderId;
 
     const body = new URLSearchParams({
       token_key: process.env.ZAPUPI_API_KEY,
@@ -61,12 +64,9 @@ app.post("/create-payment", async (req, res) => {
       amount: amount.toString(),
       order_id: orderId,
       remark: "Wallet Deposit",
+      redirect_url: redirectUrl
+    });
 
-      // 🔥 RETURN URL (IMPORTANT)
-      redirect_url:
-  encodeURIComponent(
-    "https://imaginative-lolly-654a8a.netlify.app/wallet.html?order_id=" + orderId
-  )
     const response = await fetch(
       "https://api.zapupi.com/api/create-order",
       {
@@ -87,7 +87,6 @@ app.post("/create-payment", async (req, res) => {
       });
     }
 
-    // Save pending transaction
     await db.ref(`users/${TEST_UID}/transactions/${orderId}`).set({
       order_id: orderId,
       amount,
@@ -95,7 +94,6 @@ app.post("/create-payment", async (req, res) => {
       created_at: Date.now()
     });
 
-    // Send payment URL to frontend
     res.json({
       order_id: orderId,
       payment_url: data.payment_url
@@ -108,7 +106,7 @@ app.post("/create-payment", async (req, res) => {
 });
 
 /* ===============================
-   VERIFY PAYMENT (THIS UPDATES WALLET)
+   VERIFY PAYMENT
 =============================== */
 app.post("/verify-payment", async (req, res) => {
   try {
@@ -118,7 +116,6 @@ app.post("/verify-payment", async (req, res) => {
       return res.status(400).json({ error: "Missing orderId" });
     }
 
-    // Ask Zapupi for order status
     const body = new URLSearchParams({
       token_key: process.env.ZAPUPI_API_KEY,
       secret_key: process.env.ZAPUPI_SECRET_KEY,
@@ -138,7 +135,6 @@ app.post("/verify-payment", async (req, res) => {
 
     const data = await response.json();
 
-    // Not paid yet
     if (data.status !== "success") {
       return res.json({ status: "PENDING" });
     }
@@ -148,16 +144,13 @@ app.post("/verify-payment", async (req, res) => {
 
     const snap = await txnRef.once("value");
 
-    // 🛑 Prevent double credit
     if (snap.exists() && snap.val().status === "SUCCESS") {
       return res.json({ status: "ALREADY_VERIFIED" });
     }
 
-    // ✅ Update wallet
     await db.ref(`users/${TEST_UID}/wallet/deposited`)
       .transaction(v => (v || 0) + Number(data.amount));
 
-    // ✅ Update transaction
     await txnRef.update({
       status: "SUCCESS",
       amount: data.amount,
