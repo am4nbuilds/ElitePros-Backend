@@ -12,7 +12,7 @@ app.use(cors({ origin: "*" }));
 app.use(express.json());
 
 /* ===============================
-   FIREBASE ADMIN (SAFE)
+   FIREBASE ADMIN
 =============================== */
 admin.initializeApp({
   credential: admin.credential.cert({
@@ -42,7 +42,7 @@ app.get("/", (req, res) => {
 });
 
 /* ===============================
-   CREATE PAYMENT (ZAPUPI)
+   CREATE PAYMENT
 =============================== */
 app.post("/create-payment", async (req, res) => {
   try {
@@ -87,9 +87,10 @@ app.post("/create-payment", async (req, res) => {
       });
     }
 
+    // Create PENDING transaction
     await db.ref(`users/${TEST_UID}/transactions/${orderId}`).set({
       order_id: orderId,
-      amount,
+      amount: Number(amount),
       status: "PENDING",
       created_at: Date.now()
     });
@@ -106,7 +107,7 @@ app.post("/create-payment", async (req, res) => {
 });
 
 /* ===============================
-   VERIFY PAYMENT
+   VERIFY PAYMENT (FALLBACK)
 =============================== */
 app.post("/verify-payment", async (req, res) => {
   try {
@@ -148,16 +149,14 @@ app.post("/verify-payment", async (req, res) => {
       return res.json({ status: "ALREADY_VERIFIED" });
     }
 
-    await db.ref(`users/${TEST_UID}/wallet/deposited`)
-      .transaction(v => (v || 0) + Number(data.amount));
-
-    await txnRef.update({
-      status: "SUCCESS",
-      amount: data.amount,
-      utr: data.utr,
-      txn_id: data.txn_id,
-      verified_at: Date.now()
-    });
+    await creditWalletAndUpdateTxn(
+      TEST_UID,
+      orderId,
+      Number(data.amount),
+      data.txn_id,
+      data.utr,
+      "VERIFY_API"
+    );
 
     res.json({ status: "SUCCESS" });
 
@@ -166,6 +165,7 @@ app.post("/verify-payment", async (req, res) => {
     res.status(500).json({ error: "Server error" });
   }
 });
+
 /* ===============================
    ZAPUPI WEBHOOK
 =============================== */
@@ -173,64 +173,67 @@ app.post("/webhook/zapupi", async (req, res) => {
   try {
     const payload = req.body;
 
-    console.log("Zapupi Webhook:", payload);
-
-    /*
-      Expected Zapupi payload (typical):
-      {
-        status: "success",
-        order_id: "ORD123",
-        amount: "10",
-        utr: "1234567890",
-        txn_id: "TXN123456"
-      }
-    */
+    console.log("🔥 ZAPUPI WEBHOOK:", payload);
 
     if (payload.status !== "success") {
-      return res.status(200).json({ message: "Ignored (not success)" });
+      return res.status(200).json({ message: "Ignored" });
     }
 
     const orderId = payload.order_id;
     const amount = Number(payload.amount);
-    const txnId = payload.txn_id || payload.utr;
 
-    if (!orderId || !amount || !txnId) {
-      return res.status(400).json({ error: "Invalid webhook payload" });
+    if (!orderId || !amount) {
+      return res.status(400).json({ error: "Invalid payload" });
     }
 
-    // ⚠️ TEMP: HARDCODED UID (REMOVE LATER)
-    const uid = "kNABqZe4O7Pj1UuagQ7n3887zB62";
+    await creditWalletAndUpdateTxn(
+      TEST_UID,
+      orderId,
+      amount,
+      payload.txn_id,
+      payload.utr,
+      "WEBHOOK"
+    );
 
-    const txnRef = db.ref(`users/${uid}/transactions/${txnId}`);
-    const snap = await txnRef.once("value");
-
-    // 🛑 Prevent double credit
-    if (snap.exists()) {
-      return res.status(200).json({ message: "Already processed" });
-    }
-
-    // ✅ Update wallet (atomic)
-    await db.ref(`users/${uid}/wallet/deposited`)
-      .transaction(v => (v || 0) + amount);
-
-    // ✅ Create transaction record
-    await txnRef.set({
-      txnid: txnId,
-      order_id: orderId,
-      amount: amount,
-      utr: payload.utr || null,
-      status: "SUCCESS",
-      source: "ZAPUPI_WEBHOOK",
-      created_at: Date.now()
-    });
-
-    return res.status(200).json({ message: "Wallet updated" });
+    return res.status(200).json({ message: "Wallet credited" });
 
   } catch (err) {
-    console.error("Webhook error:", err);
+    console.error("WEBHOOK ERROR:", err);
     return res.status(500).json({ error: "Server error" });
   }
 });
+
+/* ===============================
+   SHARED CREDIT FUNCTION
+=============================== */
+async function creditWalletAndUpdateTxn(
+  uid,
+  orderId,
+  amount,
+  txnId,
+  utr,
+  source
+) {
+  const txnRef = db.ref(`users/${uid}/transactions/${orderId}`);
+  const snap = await txnRef.once("value");
+
+  if (snap.exists() && snap.val().status === "SUCCESS") {
+    return;
+  }
+
+  await db.ref(`users/${uid}/wallet/deposited`)
+    .transaction(v => (v || 0) + amount);
+
+  await txnRef.update({
+    status: "SUCCESS",
+    amount,
+    txn_id: txnId || null,
+    utr: utr || null,
+    source,
+    completed_at: Date.now()
+  });
+}
+
 /* ===============================
    START SERVER
 =============================== */
