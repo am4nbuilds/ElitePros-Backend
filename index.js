@@ -15,15 +15,6 @@ app.use(express.urlencoded({ extended: true }));
 /* ===============================
    FIREBASE ADMIN
 =============================== */
-if (
-  !process.env.FB_PROJECT_ID ||
-  !process.env.FB_CLIENT_EMAIL ||
-  !process.env.FB_PRIVATE_KEY ||
-  !process.env.FB_DB_URL
-) {
-  throw new Error("Missing Firebase environment variables");
-}
-
 admin.initializeApp({
   credential: admin.credential.cert({
     projectId: process.env.FB_PROJECT_ID,
@@ -34,11 +25,6 @@ admin.initializeApp({
 });
 
 const db = admin.database();
-
-/* ===============================
-   TEMP TEST UID
-=============================== */
-const TEST_UID = "kNABqZe4O7Pj1UuagQ7n3887zB62";
 
 /* ===============================
    ROOT CHECK
@@ -56,9 +42,15 @@ app.get("/", (req, res) => {
 =============================== */
 app.post("/create-payment", async (req, res) => {
   try {
-    const { amount } = req.body;
+    const { amount, uid } = req.body;
 
-    if (!Number.isFinite(Number(amount)) || Number(amount) < 1) {
+    // 🔒 VALIDATION
+    if (!uid) {
+      return res.status(400).json({ error: "Missing uid" });
+    }
+
+    const parsedAmount = Number(amount);
+    if (!Number.isFinite(parsedAmount) || parsedAmount < 1) {
       return res.status(400).json({ error: "Invalid amount" });
     }
 
@@ -72,7 +64,7 @@ app.post("/create-payment", async (req, res) => {
     const body = new URLSearchParams({
       token_key: process.env.ZAPUPI_API_KEY,
       secret_key: process.env.ZAPUPI_SECRET_KEY,
-      amount: Number(amount).toString(),
+      amount: parsedAmount.toString(),
       order_id: orderId,
       remark: "Wallet Deposit",
       redirect_url: redirectUrl
@@ -93,17 +85,17 @@ app.post("/create-payment", async (req, res) => {
     try {
       data = JSON.parse(text);
     } catch {
-      throw new Error("Zapupi create-order non-JSON: " + text.slice(0, 150));
+      throw new Error("Zapupi create-order non-JSON");
     }
 
     if (data.status !== "success") {
-      return res.status(500).json({ error: "Zapupi order failed", data });
+      return res.status(500).json({ error: "Zapupi order failed" });
     }
 
-    // ✅ STORE AMOUNT SAFELY IN DB (SOURCE OF TRUTH)
-    await db.ref(`users/${TEST_UID}/transactions/${orderId}`).set({
-      order_id: orderId,
-      amount: Number(amount),
+    // 🔐 STORE ORDER (SOURCE OF TRUTH)
+    await db.ref(`transactions/${orderId}`).set({
+      uid,
+      amount: parsedAmount,
       status: "PENDING",
       created_at: Date.now()
     });
@@ -115,12 +107,12 @@ app.post("/create-payment", async (req, res) => {
 
   } catch (err) {
     console.error("CREATE PAYMENT ERROR:", err);
-    res.status(500).json({ error: "Server error", message: err.message });
+    res.status(500).json({ error: "Server error" });
   }
 });
 
 /* ===============================
-   VERIFY PAYMENT (SAFE)
+   VERIFY PAYMENT (PRIMARY)
 =============================== */
 app.post("/verify-payment", async (req, res) => {
   try {
@@ -134,18 +126,23 @@ app.post("/verify-payment", async (req, res) => {
       return res.json({ status: "IGNORED" });
     }
 
-    // 🔥 READ AMOUNT FROM DB (NOT ZAPUPI)
-    const txnRef = db.ref(`users/${TEST_UID}/transactions/${orderId}`);
+    // 🔐 READ FROM DB ONLY
+    const txnRef = db.ref(`transactions/${orderId}`);
     const snap = await txnRef.once("value");
 
     if (!snap.exists()) {
       return res.json({ status: "PENDING" });
     }
 
-    const amount = Number(snap.val().amount);
+    const { uid, amount, status } = snap.val();
 
-    if (!Number.isFinite(amount) || amount <= 0) {
-      throw new Error("Invalid amount in DB: " + snap.val().amount);
+    if (status === "SUCCESS") {
+      return res.json({ status: "SUCCESS" });
+    }
+
+    const parsedAmount = Number(amount);
+    if (!Number.isFinite(parsedAmount) || parsedAmount <= 0) {
+      throw new Error("Invalid amount in DB");
     }
 
     const body = new URLSearchParams({
@@ -169,32 +166,25 @@ app.post("/verify-payment", async (req, res) => {
     try {
       data = JSON.parse(text);
     } catch {
-      throw new Error("Zapupi order-status non-JSON: " + text.slice(0, 150));
+      throw new Error("Zapupi order-status non-JSON");
     }
 
     if (data.status !== "success") {
-      return res.json({ status: "PENDING", zapupi: data });
+      return res.json({ status: "PENDING" });
     }
 
-    await creditWalletAndUpdateTxn(
-      TEST_UID,
-      orderId,
-      amount,
-      data.txn_id,
-      data.utr,
-      "VERIFY_API"
-    );
+    await creditWallet(uid, orderId, parsedAmount, data.txn_id, data.utr);
 
     res.json({ status: "SUCCESS" });
 
   } catch (err) {
     console.error("VERIFY PAYMENT ERROR:", err);
-    res.status(500).json({ error: "Server error", message: err.message });
+    res.status(500).json({ error: "Server error" });
   }
 });
 
 /* ===============================
-   ZAPUPI WEBHOOK
+   ZAPUPI WEBHOOK (SECONDARY)
 =============================== */
 app.post("/webhook/zapupi", async (req, res) => {
   try {
@@ -205,68 +195,50 @@ app.post("/webhook/zapupi", async (req, res) => {
     }
 
     const orderId = payload.order_id;
+    if (!orderId) {
+      return res.status(200).json({ message: "Missing orderId" });
+    }
 
-    const txnRef = db.ref(`users/${TEST_UID}/transactions/${orderId}`);
+    const txnRef = db.ref(`transactions/${orderId}`);
     const snap = await txnRef.once("value");
 
     if (!snap.exists()) {
-      return res.status(200).json({ message: "Transaction not found" });
+      return res.status(200).json({ message: "Unknown order" });
     }
 
-    const amount = Number(snap.val().amount);
+    const { uid, amount, status } = snap.val();
 
-    if (!Number.isFinite(amount) || amount <= 0) {
-      throw new Error("Invalid amount in DB");
+    if (status === "SUCCESS") {
+      return res.status(200).json({ message: "Already processed" });
     }
 
-    await creditWalletAndUpdateTxn(
-      TEST_UID,
-      orderId,
-      amount,
-      payload.txn_id,
-      payload.utr,
-      "WEBHOOK"
-    );
+    await creditWallet(uid, orderId, Number(amount), payload.txn_id, payload.utr);
 
     res.status(200).json({ message: "Wallet credited" });
 
   } catch (err) {
     console.error("WEBHOOK ERROR:", err);
-    res.status(500).json({ error: "Server error", message: err.message });
+    res.status(500).json({ error: "Server error" });
   }
 });
 
 /* ===============================
-   SHARED CREDIT FUNCTION
+   WALLET CREDIT (ATOMIC)
 =============================== */
-async function creditWalletAndUpdateTxn(
-  uid,
-  orderId,
-  amount,
-  txnId,
-  utr,
-  source
-) {
+async function creditWallet(uid, orderId, amount, txnId, utr) {
   if (!Number.isFinite(amount) || amount <= 0) {
-    throw new Error("Attempted to credit invalid amount: " + amount);
+    throw new Error("Invalid credit amount");
   }
 
-  const txnRef = db.ref(`users/${uid}/transactions/${orderId}`);
-  const snap = await txnRef.once("value");
+  const userWalletRef = db.ref(`users/${uid}/wallet/deposited`);
+  const txnRef = db.ref(`transactions/${orderId}`);
 
-  if (snap.exists() && snap.val().status === "SUCCESS") {
-    return;
-  }
-
-  await db.ref(`users/${uid}/wallet/deposited`)
-    .transaction(v => (Number(v) || 0) + amount);
+  await userWalletRef.transaction(v => (Number(v) || 0) + amount);
 
   await txnRef.update({
     status: "SUCCESS",
-    amount,
     txn_id: txnId || null,
     utr: utr || null,
-    source,
     completed_at: Date.now()
   });
 }
