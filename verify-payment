@@ -1,0 +1,70 @@
+app.post("/verify-payment", async (req, res) => {
+  try {
+    const { orderId } = req.body;
+
+    if (!orderId) {
+      return res.status(400).json({ error: "orderId required" });
+    }
+
+    // ⚠️ TEST UID (REMOVE IN PRODUCTION)
+    const uid = "kNABqZe4O7Pj1UuagQ7n3887zB62";
+
+    // 1️⃣ Ask Zapupi for payment status
+    const body = new URLSearchParams({
+      token_key: process.env.ZAPUPI_API_KEY,
+      secret_key: process.env.ZAPUPI_SECRET_KEY,
+      order_id: orderId
+    });
+
+    const response = await fetch(
+      "https://api.zapupi.com/api/order-status",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: body.toString()
+      }
+    );
+
+    const data = await response.json();
+
+    // ⏳ Not paid yet
+    if (data.status !== "success") {
+      return res.json({ status: "PENDING" });
+    }
+
+    const txnId = data.txn_id || data.utr || orderId;
+
+    const txnRef = db.ref(
+      `users/${uid}/transactions/${txnId}`
+    );
+
+    const snap = await txnRef.once("value");
+
+    // 🛑 Prevent double credit
+    if (snap.exists()) {
+      return res.json({ status: "ALREADY_CREDITED" });
+    }
+
+    // 2️⃣ ADD MONEY TO WALLET (ATOMIC)
+    await db.ref(`users/${uid}/wallet/deposited`)
+      .transaction(current => {
+        return (current || 0) + Number(data.amount);
+      });
+
+    // 3️⃣ CREATE TRANSACTION RECORD
+    await txnRef.set({
+      txnid: txnId,
+      order_id: orderId,
+      amount: Number(data.amount),
+      utr: data.utr || null,
+      status: "SUCCESS",
+      created_at: Date.now()
+    });
+
+    return res.json({ status: "SUCCESS" });
+
+  } catch (err) {
+    console.error("VERIFY PAYMENT ERROR:", err);
+    return res.status(500).json({ error: "Server error" });
+  }
+      });
