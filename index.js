@@ -166,7 +166,71 @@ app.post("/verify-payment", async (req, res) => {
     res.status(500).json({ error: "Server error" });
   }
 });
+/* ===============================
+   ZAPUPI WEBHOOK
+=============================== */
+app.post("/webhook/zapupi", async (req, res) => {
+  try {
+    const payload = req.body;
 
+    console.log("Zapupi Webhook:", payload);
+
+    /*
+      Expected Zapupi payload (typical):
+      {
+        status: "success",
+        order_id: "ORD123",
+        amount: "10",
+        utr: "1234567890",
+        txn_id: "TXN123456"
+      }
+    */
+
+    if (payload.status !== "success") {
+      return res.status(200).json({ message: "Ignored (not success)" });
+    }
+
+    const orderId = payload.order_id;
+    const amount = Number(payload.amount);
+    const txnId = payload.txn_id || payload.utr;
+
+    if (!orderId || !amount || !txnId) {
+      return res.status(400).json({ error: "Invalid webhook payload" });
+    }
+
+    // ⚠️ TEMP: HARDCODED UID (REMOVE LATER)
+    const uid = "kNABqZe4O7Pj1UuagQ7n3887zB62";
+
+    const txnRef = db.ref(`users/${uid}/transactions/${txnId}`);
+    const snap = await txnRef.once("value");
+
+    // 🛑 Prevent double credit
+    if (snap.exists()) {
+      return res.status(200).json({ message: "Already processed" });
+    }
+
+    // ✅ Update wallet (atomic)
+    await db.ref(`users/${uid}/wallet/deposited`)
+      .transaction(v => (v || 0) + amount);
+
+    // ✅ Create transaction record
+    await txnRef.set({
+      txnid: txnId,
+      order_id: orderId,
+      amount: amount,
+      utr: payload.utr || null,
+      status: "SUCCESS",
+      source: "ZAPUPI_WEBHOOK",
+      created_at: Date.now()
+    });
+
+    return res.status(200).json({ message: "Wallet updated" });
+
+  } catch (err) {
+    console.error("Webhook error:", err);
+    return res.status(500).json({ error: "Server error" });
+  }
+});
 /* ===============================
    START SERVER
 =============================== */
