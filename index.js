@@ -10,7 +10,7 @@ const app = express();
 
 app.use(cors({ origin: "*" }));
 app.use(express.json());
-app.use(express.urlencoded({ extended: true })); // 🔥 IMPORTANT
+app.use(express.urlencoded({ extended: true }));
 
 /* ===============================
    FIREBASE ADMIN
@@ -58,7 +58,7 @@ app.post("/create-payment", async (req, res) => {
   try {
     const { amount } = req.body;
 
-    if (!amount || amount < 1) {
+    if (!Number.isFinite(Number(amount)) || Number(amount) < 1) {
       return res.status(400).json({ error: "Invalid amount" });
     }
 
@@ -72,7 +72,7 @@ app.post("/create-payment", async (req, res) => {
     const body = new URLSearchParams({
       token_key: process.env.ZAPUPI_API_KEY,
       secret_key: process.env.ZAPUPI_SECRET_KEY,
-      amount: amount.toString(),
+      amount: Number(amount).toString(),
       order_id: orderId,
       remark: "Wallet Deposit",
       redirect_url: redirectUrl
@@ -96,12 +96,11 @@ app.post("/create-payment", async (req, res) => {
       throw new Error("Zapupi create-order non-JSON: " + text.slice(0, 150));
     }
 
-    console.log("🟢 CREATE ORDER:", data);
-
     if (data.status !== "success") {
       return res.status(500).json({ error: "Zapupi order failed", data });
     }
 
+    // ✅ STORE AMOUNT SAFELY IN DB (SOURCE OF TRUTH)
     await db.ref(`users/${TEST_UID}/transactions/${orderId}`).set({
       order_id: orderId,
       amount: Number(amount),
@@ -115,20 +114,16 @@ app.post("/create-payment", async (req, res) => {
     });
 
   } catch (err) {
-    console.error("🔥 CREATE PAYMENT ERROR:", err);
-    res.status(500).json({
-      error: "Server error",
-      message: err.message
-    });
+    console.error("CREATE PAYMENT ERROR:", err);
+    res.status(500).json({ error: "Server error", message: err.message });
   }
 });
 
 /* ===============================
-   VERIFY PAYMENT (SAFE + HARDENED)
+   VERIFY PAYMENT (SAFE)
 =============================== */
 app.post("/verify-payment", async (req, res) => {
   try {
-    // 🔥 Accept orderId from ANY safe place
     const orderId =
       req.body?.orderId ||
       req.body?.order_id ||
@@ -136,8 +131,21 @@ app.post("/verify-payment", async (req, res) => {
       req.query?.order_id;
 
     if (!orderId) {
-      console.warn("⚠️ verify-payment called without orderId");
       return res.json({ status: "IGNORED" });
+    }
+
+    // 🔥 READ AMOUNT FROM DB (NOT ZAPUPI)
+    const txnRef = db.ref(`users/${TEST_UID}/transactions/${orderId}`);
+    const snap = await txnRef.once("value");
+
+    if (!snap.exists()) {
+      return res.json({ status: "PENDING" });
+    }
+
+    const amount = Number(snap.val().amount);
+
+    if (!Number.isFinite(amount) || amount <= 0) {
+      throw new Error("Invalid amount in DB: " + snap.val().amount);
     }
 
     const body = new URLSearchParams({
@@ -164,8 +172,6 @@ app.post("/verify-payment", async (req, res) => {
       throw new Error("Zapupi order-status non-JSON: " + text.slice(0, 150));
     }
 
-    console.log("🟡 ORDER STATUS:", data);
-
     if (data.status !== "success") {
       return res.json({ status: "PENDING", zapupi: data });
     }
@@ -173,7 +179,7 @@ app.post("/verify-payment", async (req, res) => {
     await creditWalletAndUpdateTxn(
       TEST_UID,
       orderId,
-      Number(data.amount),
+      amount,
       data.txn_id,
       data.utr,
       "VERIFY_API"
@@ -182,11 +188,8 @@ app.post("/verify-payment", async (req, res) => {
     res.json({ status: "SUCCESS" });
 
   } catch (err) {
-    console.error("🔥 VERIFY PAYMENT ERROR:", err);
-    res.status(500).json({
-      error: "Server error",
-      message: err.message
-    });
+    console.error("VERIFY PAYMENT ERROR:", err);
+    res.status(500).json({ error: "Server error", message: err.message });
   }
 });
 
@@ -197,17 +200,23 @@ app.post("/webhook/zapupi", async (req, res) => {
   try {
     const payload = req.body;
 
-    console.log("🔵 WEBHOOK:", payload);
-
     if (payload.status !== "success") {
       return res.status(200).json({ message: "Ignored" });
     }
 
     const orderId = payload.order_id;
-    const amount = Number(payload.amount);
 
-    if (!orderId || !amount) {
-      throw new Error("Invalid webhook payload");
+    const txnRef = db.ref(`users/${TEST_UID}/transactions/${orderId}`);
+    const snap = await txnRef.once("value");
+
+    if (!snap.exists()) {
+      return res.status(200).json({ message: "Transaction not found" });
+    }
+
+    const amount = Number(snap.val().amount);
+
+    if (!Number.isFinite(amount) || amount <= 0) {
+      throw new Error("Invalid amount in DB");
     }
 
     await creditWalletAndUpdateTxn(
@@ -222,11 +231,8 @@ app.post("/webhook/zapupi", async (req, res) => {
     res.status(200).json({ message: "Wallet credited" });
 
   } catch (err) {
-    console.error("🔥 WEBHOOK ERROR:", err);
-    res.status(500).json({
-      error: "Server error",
-      message: err.message
-    });
+    console.error("WEBHOOK ERROR:", err);
+    res.status(500).json({ error: "Server error", message: err.message });
   }
 });
 
@@ -241,16 +247,19 @@ async function creditWalletAndUpdateTxn(
   utr,
   source
 ) {
+  if (!Number.isFinite(amount) || amount <= 0) {
+    throw new Error("Attempted to credit invalid amount: " + amount);
+  }
+
   const txnRef = db.ref(`users/${uid}/transactions/${orderId}`);
   const snap = await txnRef.once("value");
 
   if (snap.exists() && snap.val().status === "SUCCESS") {
-    console.log("⚠️ Already credited:", orderId);
     return;
   }
 
   await db.ref(`users/${uid}/wallet/deposited`)
-    .transaction(v => (v || 0) + amount);
+    .transaction(v => (Number(v) || 0) + amount);
 
   await txnRef.update({
     status: "SUCCESS",
@@ -260,8 +269,6 @@ async function creditWalletAndUpdateTxn(
     source,
     completed_at: Date.now()
   });
-
-  console.log("✅ WALLET CREDITED:", orderId);
 }
 
 /* ===============================
@@ -269,5 +276,5 @@ async function creditWalletAndUpdateTxn(
 =============================== */
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log("🚀 Backend running on port", PORT);
+  console.log("Backend running on port", PORT);
 });
