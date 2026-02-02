@@ -64,9 +64,9 @@ app.post("/create-payment", async (req, res) => {
 
       // 🔥 RETURN URL (IMPORTANT)
       redirect_url:
-        "https://imaginative-lolly-654a8a.netlify.app/wallet.html?order_id=" + orderId
-    });
-
+  encodeURIComponent(
+    "https://imaginative-lolly-654a8a.netlify.app/wallet.html?order_id=" + orderId
+  )
     const response = await fetch(
       "https://api.zapupi.com/api/create-order",
       {
