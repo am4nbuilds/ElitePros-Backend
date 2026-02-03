@@ -223,7 +223,7 @@ app.post("/join-match", async (req, res) => {
     const txnId = "TXN" + Date.now();
     await userRef.child(`transactions/${txnId}`).set({
       transactionId: txnId,
-      type: "match_join",
+      type: "MATCH JOINED",
       matchId,
       amount: -entryFee,
       depositUsed,
