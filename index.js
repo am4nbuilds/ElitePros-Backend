@@ -9,7 +9,7 @@ import fetch from "node-fetch";
 const app = express();
 
 /* ===============================
-   ENV SAFETY CHECK (CRITICAL)
+   ENV SAFETY CHECK
 =============================== */
 const REQUIRED_ENV = [
   "FB_PROJECT_ID",
@@ -28,7 +28,7 @@ for (const key of REQUIRED_ENV) {
 }
 
 /* ===============================
-   CORS (GLOBAL + SAFE)
+   CORS
 =============================== */
 app.use(cors({
   origin: "*",
@@ -64,7 +64,7 @@ app.get("/", (_, res) => {
 });
 
 /* ===============================
-   CREATE PAYMENT (DEPOSIT)
+   CREATE PAYMENT
 =============================== */
 app.post("/create-payment", async (req, res) => {
   try {
@@ -110,7 +110,6 @@ app.post("/create-payment", async (req, res) => {
       amount: parsedAmount,
       status: "pending",
       gateway: "zapupi",
-      utr: null,
       timestamp: Date.now()
     });
 
@@ -168,7 +167,6 @@ app.post("/verify-payment", async (req, res) => {
 
     await txnRef.update({
       status: "success",
-      utr: zapupi.utr || null,
       completed_at: Date.now()
     });
 
@@ -181,7 +179,7 @@ app.post("/verify-payment", async (req, res) => {
 });
 
 /* ===============================
-   JOIN MATCH (CRASH-PROOF)
+   JOIN MATCH (RACE-PROOF)
 =============================== */
 app.post("/join-match", async (req, res) => {
   try {
@@ -192,7 +190,6 @@ app.post("/join-match", async (req, res) => {
 
     const matchRef = db.ref(`matches/${matchId}`);
     const userRef = db.ref(`users/${uid}`);
-    const playerRef = db.ref(`matches/${matchId}/players/${uid}`);
 
     let joinError = null;
 
@@ -200,17 +197,21 @@ app.post("/join-match", async (req, res) => {
       if (!match) return match;
       if (!match.players) match.players = {};
 
+      const maxSlots = Number(match.slots || match.maxPlayers || 0);
+      const currentPlayers = Object.keys(match.players).length;
+
       if (match.players[uid]) {
         joinError = "ALREADY_JOINED";
         return;
       }
 
-      if ((match.joinedCount || 0) >= match.maxPlayers) {
+      if (currentPlayers >= maxSlots) {
         joinError = "MATCH_FULL";
         return;
       }
 
-      match.joinedCount = (match.joinedCount || 0) + 1;
+      // 🔒 Reserve slot atomically
+      match.players[uid] = { reservedAt: Date.now() };
       return match;
     });
 
@@ -242,7 +243,7 @@ app.post("/join-match", async (req, res) => {
     const username =
       (await userRef.child("username").once("value")).val() || "";
 
-    await playerRef.set({
+    await matchRef.child(`players/${uid}`).set({
       uid,
       username,
       ign,
