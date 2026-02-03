@@ -8,7 +8,28 @@ import fetch from "node-fetch";
 =============================== */
 const app = express();
 
-/* 🔥 CORS — MUST BE FIRST */
+/* ===============================
+   ENV SAFETY CHECK (CRITICAL)
+=============================== */
+const REQUIRED_ENV = [
+  "FB_PROJECT_ID",
+  "FB_CLIENT_EMAIL",
+  "FB_PRIVATE_KEY",
+  "FB_DB_URL",
+  "ZAPUPI_API_KEY",
+  "ZAPUPI_SECRET_KEY"
+];
+
+for (const key of REQUIRED_ENV) {
+  if (!process.env[key]) {
+    console.error(`❌ Missing ENV variable: ${key}`);
+    process.exit(1);
+  }
+}
+
+/* ===============================
+   CORS (GLOBAL + SAFE)
+=============================== */
 app.use(cors({
   origin: "*",
   methods: ["GET", "POST", "OPTIONS"],
@@ -20,16 +41,18 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 /* ===============================
-   FIREBASE ADMIN
+   FIREBASE ADMIN (GUARDED)
 =============================== */
-admin.initializeApp({
-  credential: admin.credential.cert({
-    projectId: process.env.FB_PROJECT_ID,
-    clientEmail: process.env.FB_CLIENT_EMAIL,
-    privateKey: process.env.FB_PRIVATE_KEY.replace(/\\n/g, "\n")
-  }),
-  databaseURL: process.env.FB_DB_URL
-});
+if (!admin.apps.length) {
+  admin.initializeApp({
+    credential: admin.credential.cert({
+      projectId: process.env.FB_PROJECT_ID,
+      clientEmail: process.env.FB_CLIENT_EMAIL,
+      privateKey: process.env.FB_PRIVATE_KEY.replace(/\\n/g, "\n")
+    }),
+    databaseURL: process.env.FB_DB_URL
+  });
+}
 
 const db = admin.database();
 
@@ -53,7 +76,6 @@ app.post("/create-payment", async (req, res) => {
     }
 
     const orderId = "ORD" + Date.now();
-
     const redirectUrl =
       "https://imaginative-lolly-654a8a.netlify.app/wallet.html?order_id=" +
       orderId;
@@ -79,13 +101,12 @@ app.post("/create-payment", async (req, res) => {
     const zapupi = JSON.parse(await zapupiRes.text());
 
     if (zapupi.status !== "success") {
-      return res.status(500).json({ error: "Zapupi failed" });
+      return res.status(502).json({ error: "Payment gateway error" });
     }
 
     await db.ref(`users/${uid}/transactions/${orderId}`).set({
       transactionId: orderId,
       type: "deposit",
-      reason: "Wallet Deposit",
       amount: parsedAmount,
       status: "pending",
       gateway: "zapupi",
@@ -93,10 +114,7 @@ app.post("/create-payment", async (req, res) => {
       timestamp: Date.now()
     });
 
-    res.json({
-      order_id: orderId,
-      payment_url: zapupi.payment_url
-    });
+    res.json({ order_id: orderId, payment_url: zapupi.payment_url });
 
   } catch (err) {
     console.error("CREATE PAYMENT ERROR:", err);
@@ -122,7 +140,7 @@ app.post("/verify-payment", async (req, res) => {
 
     const amount = Number(snap.val().amount);
     if (!Number.isFinite(amount) || amount <= 0) {
-      throw new Error("Invalid amount");
+      return res.status(500).json({ error: "Invalid transaction amount" });
     }
 
     const body = new URLSearchParams({
@@ -157,13 +175,13 @@ app.post("/verify-payment", async (req, res) => {
     res.json({ status: "SUCCESS" });
 
   } catch (err) {
-    console.error("VERIFY ERROR:", err);
+    console.error("VERIFY PAYMENT ERROR:", err);
     res.status(500).json({ error: "Server error" });
   }
 });
 
 /* ===============================
-   JOIN MATCH (PRODUCTION SAFE)
+   JOIN MATCH (CRASH-PROOF)
 =============================== */
 app.post("/join-match", async (req, res) => {
   try {
@@ -176,16 +194,29 @@ app.post("/join-match", async (req, res) => {
     const userRef = db.ref(`users/${uid}`);
     const playerRef = db.ref(`matches/${matchId}/players/${uid}`);
 
+    let joinError = null;
+
     await matchRef.transaction(match => {
       if (!match) return match;
       if (!match.players) match.players = {};
-      if (match.players[uid]) throw new Error("ALREADY_JOINED");
-      if ((match.joinedCount || 0) >= match.maxPlayers) {
-        throw new Error("MATCH_FULL");
+
+      if (match.players[uid]) {
+        joinError = "ALREADY_JOINED";
+        return;
       }
+
+      if ((match.joinedCount || 0) >= match.maxPlayers) {
+        joinError = "MATCH_FULL";
+        return;
+      }
+
       match.joinedCount = (match.joinedCount || 0) + 1;
       return match;
     });
+
+    if (joinError) {
+      return res.status(409).json({ error: joinError });
+    }
 
     const wallet = (await userRef.child("wallet").once("value")).val() || {};
     const entryFee =
@@ -194,11 +225,11 @@ app.post("/join-match", async (req, res) => {
     const deposited = Number(wallet.deposited || 0);
     const winnings = Number(wallet.winnings || 0);
 
-    let depositUsed = Math.min(deposited, entryFee);
-    let winningUsed = entryFee - depositUsed;
+    const depositUsed = Math.min(deposited, entryFee);
+    const winningUsed = entryFee - depositUsed;
 
     if (depositUsed + winningUsed < entryFee) {
-      throw new Error("INSUFFICIENT_BALANCE");
+      return res.status(403).json({ error: "INSUFFICIENT_BALANCE" });
     }
 
     await userRef.child("wallet").update({
@@ -223,7 +254,7 @@ app.post("/join-match", async (req, res) => {
     const txnId = "TXN" + Date.now();
     await userRef.child(`transactions/${txnId}`).set({
       transactionId: txnId,
-      type: "MATCH JOINED",
+      type: "match_join",
       matchId,
       amount: -entryFee,
       depositUsed,
@@ -235,18 +266,7 @@ app.post("/join-match", async (req, res) => {
     res.json({ status: "SUCCESS" });
 
   } catch (err) {
-    console.error("JOIN MATCH ERROR:", err.message);
-
-    if (err.message === "ALREADY_JOINED") {
-      return res.status(409).json({ error: "Already joined" });
-    }
-    if (err.message === "MATCH_FULL") {
-      return res.status(409).json({ error: "Match full" });
-    }
-    if (err.message === "INSUFFICIENT_BALANCE") {
-      return res.status(403).json({ error: "Insufficient balance" });
-    }
-
+    console.error("JOIN MATCH ERROR:", err);
     res.status(500).json({ error: "Server error" });
   }
 });
