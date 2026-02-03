@@ -7,7 +7,15 @@ import fetch from "node-fetch";
    APP SETUP
 =============================== */
 const app = express();
-app.use(cors({ origin: "*" }));
+
+/* 🔥 CORS — MUST BE FIRST */
+app.use(cors({
+  origin: "*",
+  methods: ["GET", "POST", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"]
+}));
+app.options("*", cors());
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
@@ -168,7 +176,6 @@ app.post("/join-match", async (req, res) => {
     const userRef = db.ref(`users/${uid}`);
     const playerRef = db.ref(`matches/${matchId}/players/${uid}`);
 
-    // 🔒 Atomic match lock (prevents race + double join)
     await matchRef.transaction(match => {
       if (!match) return match;
       if (!match.players) match.players = {};
@@ -180,7 +187,6 @@ app.post("/join-match", async (req, res) => {
       return match;
     });
 
-    // 💰 Wallet calculation
     const wallet = (await userRef.child("wallet").once("value")).val() || {};
     const entryFee =
       Number((await matchRef.child("entryFee").once("value")).val()) || 0;
@@ -195,16 +201,13 @@ app.post("/join-match", async (req, res) => {
       throw new Error("INSUFFICIENT_BALANCE");
     }
 
-    // 🔐 Deduct wallet
     await userRef.child("wallet").update({
       deposited: deposited - depositUsed,
       winnings: winnings - winningUsed
     });
 
-    // 🧠 Save IGN for future joins
     await userRef.update({ ign });
 
-    // 🎮 Save player info
     const username =
       (await userRef.child("username").once("value")).val() || "";
 
@@ -217,7 +220,6 @@ app.post("/join-match", async (req, res) => {
       joinedAt: Date.now()
     });
 
-    // 💳 Create transaction (USER-SCOPED)
     const txnId = "TXN" + Date.now();
     await userRef.child(`transactions/${txnId}`).set({
       transactionId: txnId,
