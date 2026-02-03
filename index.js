@@ -75,16 +75,15 @@ app.post("/create-payment", async (req, res) => {
     }
 
     /* ===============================
-       CREATE TRANSACTION (DESIGN-FIRST)
+       CREATE USER TRANSACTION (PENDING)
     =============================== */
-    await db.ref(`transactions/${uid}/${orderId}`).set({
+    await db.ref(`users/${uid}/transactions/${orderId}`).set({
       transactionId: orderId,
       type: "deposit",
       reason: "Wallet Deposit",
-      amount: parsedAmount,            // positive = credit
+      amount: parsedAmount,
       status: "pending",
       gateway: "zapupi",
-      source: "upi",
       utr: null,
       timestamp: Date.now()
     });
@@ -101,20 +100,69 @@ app.post("/create-payment", async (req, res) => {
 });
 
 /* ===============================
-   VERIFY PAYMENT
+   VERIFY PAYMENT (SETTLEMENT)
 =============================== */
 app.post("/verify-payment", async (req, res) => {
   try {
-    const orderId =
-      req.body?.orderId ||
-      req.query?.order_id;
+    const { uid, orderId } = req.body;
 
-    if (!orderId) return res.json({ status: "IGNORED" });
+    if (!uid || !orderId) {
+      return res.status(400).json({ error: "Missing uid or orderId" });
+    }
 
-    // 🔎 Find transaction by scanning users later if needed
-    // For now we assume wallet page sends correct uid later
+    const txnRef = db.ref(`users/${uid}/transactions/${orderId}`);
+    const snap = await txnRef.once("value");
 
-    return res.json({ status: "PENDING" });
+    if (!snap.exists()) {
+      return res.json({ status: "NOT_FOUND" });
+    }
+
+    if (snap.val().status === "success") {
+      return res.json({ status: "SUCCESS" });
+    }
+
+    const amount = Number(snap.val().amount);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      throw new Error("Invalid amount in transaction");
+    }
+
+    const body = new URLSearchParams({
+      token_key: process.env.ZAPUPI_API_KEY,
+      secret_key: process.env.ZAPUPI_SECRET_KEY,
+      order_id: orderId
+    });
+
+    const statusRes = await fetch(
+      "https://api.zapupi.com/api/order-status",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: body.toString()
+      }
+    );
+
+    const zapupi = JSON.parse(await statusRes.text());
+
+    if (zapupi.status !== "success") {
+      return res.json({ status: "PENDING" });
+    }
+
+    /* ===============================
+       CREDIT WALLET (ATOMIC)
+    =============================== */
+    await db.ref(`users/${uid}/wallet/deposited`)
+      .transaction(v => (Number(v) || 0) + amount);
+
+    /* ===============================
+       UPDATE TRANSACTION
+    =============================== */
+    await txnRef.update({
+      status: "success",
+      utr: zapupi.utr || null,
+      completed_at: Date.now()
+    });
+
+    res.json({ status: "SUCCESS" });
 
   } catch (err) {
     console.error("VERIFY ERROR:", err);
