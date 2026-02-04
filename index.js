@@ -57,6 +57,26 @@ if (!admin.apps.length) {
 const db = admin.database();
 
 /* ===============================
+   AUTH MIDDLEWARE (MANDATORY)
+=============================== */
+async function verifyFirebaseToken(req, res, next) {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith("Bearer ")) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    const token = authHeader.split("Bearer ")[1];
+    const decoded = await admin.auth().verifyIdToken(token);
+
+    req.uid = decoded.uid; // 🔐 TRUST ONLY THIS
+    next();
+  } catch (err) {
+    return res.status(401).json({ error: "Invalid or expired token" });
+  }
+}
+
+/* ===============================
    ROOT CHECK
 =============================== */
 app.get("/", (_, res) => {
@@ -66,13 +86,14 @@ app.get("/", (_, res) => {
 /* ===============================
    CREATE PAYMENT
 =============================== */
-app.post("/create-payment", async (req, res) => {
+app.post("/create-payment", verifyFirebaseToken, async (req, res) => {
   try {
-    const { uid, amount } = req.body;
+    const uid = req.uid;
+    const { amount } = req.body;
     const parsedAmount = Number(amount);
 
-    if (!uid || !Number.isFinite(parsedAmount) || parsedAmount < 1) {
-      return res.status(400).json({ error: "Invalid request" });
+    if (!Number.isFinite(parsedAmount) || parsedAmount < 1) {
+      return res.status(400).json({ error: "Invalid amount" });
     }
 
     const orderId = "ORD" + Date.now();
@@ -124,11 +145,13 @@ app.post("/create-payment", async (req, res) => {
 /* ===============================
    VERIFY PAYMENT
 =============================== */
-app.post("/verify-payment", async (req, res) => {
+app.post("/verify-payment", verifyFirebaseToken, async (req, res) => {
   try {
-    const { uid, orderId } = req.body;
-    if (!uid || !orderId) {
-      return res.status(400).json({ error: "Missing uid or orderId" });
+    const uid = req.uid;
+    const { orderId } = req.body;
+
+    if (!orderId) {
+      return res.status(400).json({ error: "Missing orderId" });
     }
 
     const txnRef = db.ref(`users/${uid}/transactions/${orderId}`);
@@ -179,44 +202,36 @@ app.post("/verify-payment", async (req, res) => {
 });
 
 /* ===============================
-   JOIN MATCH (RACE-PROOF)
+   JOIN MATCH (RACE + AUTH SAFE)
 =============================== */
-app.post("/join-match", async (req, res) => {
+app.post("/join-match", verifyFirebaseToken, async (req, res) => {
   try {
-    const { uid, matchId, ign } = req.body;
-    if (!uid || !matchId || !ign) {
+    const uid = req.uid;
+    const { matchId, ign } = req.body;
+
+    if (!matchId || !ign) {
       return res.status(400).json({ error: "Missing data" });
     }
 
     const matchRef = db.ref(`matches/${matchId}`);
     const userRef = db.ref(`users/${uid}`);
 
-    let joinError = null;
-
-    await matchRef.transaction(match => {
+    const result = await matchRef.transaction(match => {
       if (!match) return match;
       if (!match.players) match.players = {};
 
       const maxSlots = Number(match.slots || match.maxPlayers || 0);
       const currentPlayers = Object.keys(match.players).length;
 
-      if (match.players[uid]) {
-        joinError = "ALREADY_JOINED";
-        return;
-      }
+      if (match.players[uid]) return;
+      if (currentPlayers >= maxSlots) return;
 
-      if (currentPlayers >= maxSlots) {
-        joinError = "MATCH_FULL";
-        return;
-      }
-
-      // 🔒 Reserve slot atomically
       match.players[uid] = { reservedAt: Date.now() };
       return match;
-    });
+    }, { applyLocally: false });
 
-    if (joinError) {
-      return res.status(409).json({ error: joinError });
+    if (!result.committed) {
+      return res.status(409).json({ error: "MATCH_FULL_OR_ALREADY_JOINED" });
     }
 
     const wallet = (await userRef.child("wallet").once("value")).val() || {};
