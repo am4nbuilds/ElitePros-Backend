@@ -41,7 +41,7 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 /* ===============================
-   FIREBASE ADMIN (GUARDED)
+   FIREBASE ADMIN
 =============================== */
 if (!admin.apps.length) {
   admin.initializeApp({
@@ -57,70 +57,63 @@ if (!admin.apps.length) {
 const db = admin.database();
 
 /* ===============================
-   AUTH MIDDLEWARE (MANDATORY)
+   AUTH MIDDLEWARE
 =============================== */
 async function verifyFirebaseToken(req, res, next) {
   try {
     const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    if (!authHeader?.startsWith("Bearer ")) {
       return res.status(401).json({ error: "Unauthorized" });
     }
 
     const token = authHeader.split("Bearer ")[1];
     const decoded = await admin.auth().verifyIdToken(token);
-
-    req.uid = decoded.uid; // 🔐 TRUST ONLY THIS
+    req.uid = decoded.uid;
     next();
-  } catch (err) {
-    return res.status(401).json({ error: "Invalid or expired token" });
+  } catch {
+    return res.status(401).json({ error: "Invalid token" });
   }
 }
 
 /* ===============================
-   ROOT CHECK
+   ROOT
 =============================== */
 app.get("/", (_, res) => {
   res.json({ status: "OK", service: "ElitePros Backend" });
 });
 
 /* ===============================
-   CREATE PAYMENT
+   CREATE PAYMENT (DEPOSIT)
 =============================== */
 app.post("/create-payment", verifyFirebaseToken, async (req, res) => {
   try {
     const uid = req.uid;
-    const { amount } = req.body;
-    const parsedAmount = Number(amount);
+    const amount = Number(req.body.amount);
 
-    if (!Number.isFinite(parsedAmount) || parsedAmount < 1) {
+    if (!Number.isFinite(amount) || amount < 1) {
       return res.status(400).json({ error: "Invalid amount" });
     }
 
     const orderId = "ORD" + Date.now();
     const redirectUrl =
-      "https://imaginative-lolly-654a8a.netlify.app/wallet.html?order_id=" +
-      orderId;
+      "https://imaginative-lolly-654a8a.netlify.app/wallet.html?order_id=" + orderId;
 
     const body = new URLSearchParams({
       token_key: process.env.ZAPUPI_API_KEY,
       secret_key: process.env.ZAPUPI_SECRET_KEY,
-      amount: parsedAmount.toString(),
+      amount: amount.toString(),
       order_id: orderId,
       remark: "Wallet Deposit",
       redirect_url: redirectUrl
     });
 
-    const zapupiRes = await fetch(
-      "https://api.zapupi.com/api/create-order",
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: body.toString()
-      }
-    );
+    const zapupiRes = await fetch("https://api.zapupi.com/api/create-order", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: body.toString()
+    });
 
     const zapupi = JSON.parse(await zapupiRes.text());
-
     if (zapupi.status !== "success") {
       return res.status(502).json({ error: "Payment gateway error" });
     }
@@ -128,16 +121,15 @@ app.post("/create-payment", verifyFirebaseToken, async (req, res) => {
     await db.ref(`users/${uid}/transactions/${orderId}`).set({
       transactionId: orderId,
       type: "deposit",
-      amount: parsedAmount,
+      amount,
       status: "pending",
-      gateway: "zapupi",
       timestamp: Date.now()
     });
 
     res.json({ order_id: orderId, payment_url: zapupi.payment_url });
 
   } catch (err) {
-    console.error("CREATE PAYMENT ERROR:", err);
+    console.error(err);
     res.status(500).json({ error: "Server error" });
   }
 });
@@ -150,10 +142,6 @@ app.post("/verify-payment", verifyFirebaseToken, async (req, res) => {
     const uid = req.uid;
     const { orderId } = req.body;
 
-    if (!orderId) {
-      return res.status(400).json({ error: "Missing orderId" });
-    }
-
     const txnRef = db.ref(`users/${uid}/transactions/${orderId}`);
     const snap = await txnRef.once("value");
 
@@ -161,9 +149,6 @@ app.post("/verify-payment", verifyFirebaseToken, async (req, res) => {
     if (snap.val().status === "success") return res.json({ status: "SUCCESS" });
 
     const amount = Number(snap.val().amount);
-    if (!Number.isFinite(amount) || amount <= 0) {
-      return res.status(500).json({ error: "Invalid transaction amount" });
-    }
 
     const body = new URLSearchParams({
       token_key: process.env.ZAPUPI_API_KEY,
@@ -171,118 +156,67 @@ app.post("/verify-payment", verifyFirebaseToken, async (req, res) => {
       order_id: orderId
     });
 
-    const statusRes = await fetch(
-      "https://api.zapupi.com/api/order-status",
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: body.toString()
-      }
-    );
+    const statusRes = await fetch("https://api.zapupi.com/api/order-status", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: body.toString()
+    });
 
     const zapupi = JSON.parse(await statusRes.text());
-    if (zapupi.status !== "success") {
-      return res.json({ status: "PENDING" });
-    }
+    if (zapupi.status !== "success") return res.json({ status: "PENDING" });
 
     await db.ref(`users/${uid}/wallet/deposited`)
       .transaction(v => (Number(v) || 0) + amount);
 
-    await txnRef.update({
-      status: "success",
-      completed_at: Date.now()
-    });
-
+    await txnRef.update({ status: "success" });
     res.json({ status: "SUCCESS" });
 
-  } catch (err) {
-    console.error("VERIFY PAYMENT ERROR:", err);
+  } catch {
     res.status(500).json({ error: "Server error" });
   }
 });
 
 /* ===============================
-   JOIN MATCH (RACE + AUTH SAFE)
+   REQUEST WITHDRAWAL (NEW)
 =============================== */
-app.post("/join-match", verifyFirebaseToken, async (req, res) => {
+app.post("/request-withdraw", verifyFirebaseToken, async (req, res) => {
   try {
     const uid = req.uid;
-    const { matchId, ign } = req.body;
+    const amount = Number(req.body.amount);
 
-    if (!matchId || !ign) {
-      return res.status(400).json({ error: "Missing data" });
+    if (!Number.isFinite(amount) || amount <= 0) {
+      return res.status(400).json({ error: "Invalid amount" });
     }
 
-    const matchRef = db.ref(`matches/${matchId}`);
-    const userRef = db.ref(`users/${uid}`);
+    const walletRef = db.ref(`users/${uid}/wallet`);
+    const walletSnap = await walletRef.once("value");
+    const winnings = Number(walletSnap.val()?.winnings || 0);
 
-    const result = await matchRef.transaction(match => {
-      if (!match) return match;
-      if (!match.players) match.players = {};
-
-      const maxSlots = Number(match.slots || match.maxPlayers || 0);
-      const currentPlayers = Object.keys(match.players).length;
-
-      if (match.players[uid]) return;
-      if (currentPlayers >= maxSlots) return;
-
-      match.players[uid] = { reservedAt: Date.now() };
-      return match;
-    }, { applyLocally: false });
-
-    if (!result.committed) {
-      return res.status(409).json({ error: "MATCH_FULL_OR_ALREADY_JOINED" });
+    if (amount > winnings) {
+      return res.status(403).json({ error: "Insufficient winnings" });
     }
 
-    const wallet = (await userRef.child("wallet").once("value")).val() || {};
-    const entryFee =
-      Number((await matchRef.child("entryFee").once("value")).val()) || 0;
+    const txnId = "WDR_" + Date.now();
 
-    const deposited = Number(wallet.deposited || 0);
-    const winnings = Number(wallet.winnings || 0);
-
-    const depositUsed = Math.min(deposited, entryFee);
-    const winningUsed = entryFee - depositUsed;
-
-    if (depositUsed + winningUsed < entryFee) {
-      return res.status(403).json({ error: "INSUFFICIENT_BALANCE" });
-    }
-
-    await userRef.child("wallet").update({
-      deposited: deposited - depositUsed,
-      winnings: winnings - winningUsed
+    // 🔒 Deduct winnings immediately
+    await walletRef.update({
+      winnings: winnings - amount
     });
 
-    await userRef.update({ ign });
-
-    const username =
-      (await userRef.child("username").once("value")).val() || "";
-
-    await matchRef.child(`players/${uid}`).set({
-      uid,
-      username,
-      ign,
-      depositUsed,
-      winningUsed,
-      joinedAt: Date.now()
-    });
-
-    const txnId = "TXN" + Date.now();
-    await userRef.child(`transactions/${txnId}`).set({
+    // 📄 Create withdrawal transaction
+    await db.ref(`users/${uid}/transactions/${txnId}`).set({
       transactionId: txnId,
-      type: "match_join",
-      matchId,
-      amount: -entryFee,
-      depositUsed,
-      winningUsed,
-      status: "success",
+      type: "withdrawal",
+      amount: -amount,
+      status: "pending",
+      reason: "Withdrawal request",
       timestamp: Date.now()
     });
 
-    res.json({ status: "SUCCESS" });
+    res.json({ status: "PENDING", transactionId: txnId });
 
   } catch (err) {
-    console.error("JOIN MATCH ERROR:", err);
+    console.error("WITHDRAW ERROR:", err);
     res.status(500).json({ error: "Server error" });
   }
 });
