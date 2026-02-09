@@ -57,19 +57,19 @@ if (!admin.apps.length) {
 const db = admin.database();
 
 /* ===============================
-   AUTH MIDDLEWARE (MANDATORY)
+   AUTH MIDDLEWARE
 =============================== */
 async function verifyFirebaseToken(req, res, next) {
   try {
     const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    if (!authHeader?.startsWith("Bearer ")) {
       return res.status(401).json({ error: "Unauthorized" });
     }
 
     const token = authHeader.split("Bearer ")[1];
     const decoded = await admin.auth().verifyIdToken(token);
 
-    req.uid = decoded.uid;
+    req.uid = decoded.uid; // 🔒 ONLY TRUST THIS
     next();
   } catch (err) {
     return res.status(401).json({ error: "Invalid or expired token" });
@@ -77,14 +77,24 @@ async function verifyFirebaseToken(req, res, next) {
 }
 
 /* ===============================
-   ROOT CHECK
+   ADMIN CHECK
+=============================== */
+async function verifyAdmin(req, res, next) {
+  try {
+    const uid = req.uid;
+    const snap = await db.ref(`admins/${uid}`).once("value");
+    if (snap.val() === true) return next();
+    return res.status(403).json({ error: "Admin only" });
+  } catch {
+    return res.status(403).json({ error: "Admin only" });
+  }
+}
+
+/* ===============================
+   ROOT
 =============================== */
 app.get("/", (_, res) => {
-  res.json({
-    status: "OK",
-    service: "ElitePros Backend",
-    time: new Date().toISOString()
-  });
+  res.json({ status: "OK", service: "ElitePros Backend" });
 });
 
 /* ===============================
@@ -112,14 +122,11 @@ app.post("/create-payment", verifyFirebaseToken, async (req, res) => {
       redirect_url: redirectUrl
     });
 
-    const zapupiRes = await fetch(
-      "https://api.zapupi.com/api/create-order",
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: body.toString()
-      }
-    );
+    const zapupiRes = await fetch("https://api.zapupi.com/api/create-order", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: body.toString()
+    });
 
     const zapupi = JSON.parse(await zapupiRes.text());
     if (zapupi.status !== "success") {
@@ -131,14 +138,10 @@ app.post("/create-payment", verifyFirebaseToken, async (req, res) => {
       type: "deposit",
       amount,
       status: "pending",
-      gateway: "zapupi",
       timestamp: Date.now()
     });
 
-    res.json({
-      order_id: orderId,
-      payment_url: zapupi.payment_url
-    });
+    res.json({ order_id: orderId, payment_url: zapupi.payment_url });
 
   } catch (err) {
     console.error("CREATE PAYMENT ERROR:", err);
@@ -154,10 +157,6 @@ app.post("/verify-payment", verifyFirebaseToken, async (req, res) => {
     const uid = req.uid;
     const { orderId } = req.body;
 
-    if (!orderId) {
-      return res.status(400).json({ error: "Missing orderId" });
-    }
-
     const txnRef = db.ref(`users/${uid}/transactions/${orderId}`);
     const snap = await txnRef.once("value");
 
@@ -165,9 +164,6 @@ app.post("/verify-payment", verifyFirebaseToken, async (req, res) => {
     if (snap.val().status === "success") return res.json({ status: "SUCCESS" });
 
     const amount = Number(snap.val().amount);
-    if (!Number.isFinite(amount) || amount <= 0) {
-      return res.status(500).json({ error: "Invalid transaction amount" });
-    }
 
     const body = new URLSearchParams({
       token_key: process.env.ZAPUPI_API_KEY,
@@ -175,38 +171,28 @@ app.post("/verify-payment", verifyFirebaseToken, async (req, res) => {
       order_id: orderId
     });
 
-    const statusRes = await fetch(
-      "https://api.zapupi.com/api/order-status",
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: body.toString()
-      }
-    );
+    const statusRes = await fetch("https://api.zapupi.com/api/order-status", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: body.toString()
+    });
 
     const zapupi = JSON.parse(await statusRes.text());
-    if (zapupi.status !== "success") {
-      return res.json({ status: "PENDING" });
-    }
+    if (zapupi.status !== "success") return res.json({ status: "PENDING" });
 
-    await db.ref(`users/${uid}/wallet/deposited`)
-      .transaction(v => (Number(v) || 0) + amount);
-
-    await txnRef.update({
-      status: "success",
-      completed_at: Date.now()
-    });
+    await db.ref(`users/${uid}/wallet/winnings`).transaction(v => (Number(v) || 0) + amount);
+    await txnRef.update({ status: "success" });
 
     res.json({ status: "SUCCESS" });
 
   } catch (err) {
-    console.error("VERIFY PAYMENT ERROR:", err);
+    console.error("VERIFY ERROR:", err);
     res.status(500).json({ error: "Server error" });
   }
 });
 
 /* ===============================
-   REQUEST WITHDRAWAL (FIXED)
+   REQUEST WITHDRAWAL (USER)
 =============================== */
 app.post("/request-withdraw", verifyFirebaseToken, async (req, res) => {
   try {
@@ -217,38 +203,76 @@ app.post("/request-withdraw", verifyFirebaseToken, async (req, res) => {
       return res.status(400).json({ error: "Invalid amount" });
     }
 
-    const winningsRef = db.ref(`users/${uid}/wallet/winnings`);
-    let deducted = false;
+    const walletRef = db.ref(`users/${uid}/wallet/winnings`);
+    const snap = await walletRef.once("value");
+    const winnings = Number(snap.val() || 0);
 
-    const result = await winningsRef.transaction(current => {
-      const currentWinnings = Number(current || 0);
-      if (currentWinnings < amount) return;
-      deducted = true;
-      return currentWinnings - amount;
-    });
-
-    if (!deducted || !result.committed) {
+    if (amount > winnings) {
       return res.status(403).json({ error: "Insufficient winnings" });
     }
 
     const txnId = "WDR_" + Date.now();
 
+    await walletRef.transaction(v => (Number(v) || 0) - amount);
+
     await db.ref(`users/${uid}/transactions/${txnId}`).set({
       transactionId: txnId,
       type: "withdrawal",
-      amount: -amount,
+      amount,
       status: "pending",
-      reason: "Withdrawal request",
+      reason: "Withdrawal requested",
       timestamp: Date.now()
     });
 
-    res.json({
-      status: "PENDING",
-      transactionId: txnId
-    });
+    res.json({ status: "PENDING", transactionId: txnId });
 
   } catch (err) {
     console.error("WITHDRAW ERROR:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+/* ===============================
+   ADMIN: APPROVE / REJECT WITHDRAWAL
+=============================== */
+app.post("/admin/withdrawal-action", verifyFirebaseToken, verifyAdmin, async (req, res) => {
+  try {
+    const { userId, transactionId, action, reason } = req.body;
+
+    const txnRef = db.ref(`users/${userId}/transactions/${transactionId}`);
+    const snap = await txnRef.once("value");
+
+    if (!snap.exists()) {
+      return res.status(404).json({ error: "Transaction not found" });
+    }
+
+    const txn = snap.val();
+    if (txn.status !== "pending") {
+      return res.status(400).json({ error: "Already processed" });
+    }
+
+    if (action === "approve") {
+      await txnRef.update({ status: "success" });
+      return res.json({ status: "APPROVED" });
+    }
+
+    if (action === "reject") {
+      const refundAmount = Number(txn.amount);
+      await db.ref(`users/${userId}/wallet/winnings`)
+        .transaction(v => (Number(v) || 0) + refundAmount);
+
+      await txnRef.update({
+        status: "rejected",
+        reason: reason || "Rejected by admin"
+      });
+
+      return res.json({ status: "REJECTED" });
+    }
+
+    res.status(400).json({ error: "Invalid action" });
+
+  } catch (err) {
+    console.error("ADMIN WITHDRAW ERROR:", err);
     res.status(500).json({ error: "Server error" });
   }
 });
