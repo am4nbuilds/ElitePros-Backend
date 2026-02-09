@@ -38,7 +38,6 @@ app.use(cors({
 app.options("*", cors());
 
 app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
 
 /* ===============================
    FIREBASE ADMIN
@@ -73,6 +72,18 @@ async function verifyFirebaseToken(req, res, next) {
   } catch {
     return res.status(401).json({ error: "Invalid token" });
   }
+}
+
+/* ===============================
+   ADMIN CHECK
+=============================== */
+async function verifyAdmin(req, res, next) {
+  const uid = req.uid;
+  const adminSnap = await db.ref(`adminConfig/${uid}`).once("value");
+  if (adminSnap.val() === true) {
+    return next();
+  }
+  return res.status(403).json({ error: "Admin only" });
 }
 
 /* ===============================
@@ -177,7 +188,7 @@ app.post("/verify-payment", verifyFirebaseToken, async (req, res) => {
 });
 
 /* ===============================
-   REQUEST WITHDRAWAL (NEW)
+   REQUEST WITHDRAWAL (USER)
 =============================== */
 app.post("/request-withdraw", verifyFirebaseToken, async (req, res) => {
   try {
@@ -198,25 +209,75 @@ app.post("/request-withdraw", verifyFirebaseToken, async (req, res) => {
 
     const txnId = "WDR_" + Date.now();
 
-    // 🔒 Deduct winnings immediately
-    await walletRef.update({
-      winnings: winnings - amount
-    });
-
-    // 📄 Create withdrawal transaction
     await db.ref(`users/${uid}/transactions/${txnId}`).set({
       transactionId: txnId,
       type: "withdrawal",
-      amount: -amount,
+      amount,
       status: "pending",
-      reason: "Withdrawal request",
+      reason: "",
       timestamp: Date.now()
     });
 
     res.json({ status: "PENDING", transactionId: txnId });
 
   } catch (err) {
-    console.error("WITHDRAW ERROR:", err);
+    console.error(err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+/* ===============================
+   ADMIN: MANAGE WITHDRAWAL
+=============================== */
+app.post("/admin/withdraw-action", verifyFirebaseToken, verifyAdmin, async (req, res) => {
+  try {
+    const { userId, txnId, action, reason } = req.body;
+
+    if (!userId || !txnId || !["approve", "reject"].includes(action)) {
+      return res.status(400).json({ error: "Invalid request" });
+    }
+
+    const txnRef = db.ref(`users/${userId}/transactions/${txnId}`);
+    const snap = await txnRef.once("value");
+
+    if (!snap.exists()) {
+      return res.status(404).json({ error: "Transaction not found" });
+    }
+
+    if (snap.val().status !== "pending") {
+      return res.status(409).json({ error: "Already processed" });
+    }
+
+    const amount = Number(snap.val().amount);
+    const walletRef = db.ref(`users/${userId}/wallet`);
+
+    if (action === "reject") {
+      if (!reason || reason.length < 3) {
+        return res.status(400).json({ error: "Rejection reason required" });
+      }
+
+      // 🔄 Refund winnings
+      await walletRef.child("winnings")
+        .transaction(v => (Number(v) || 0) + amount);
+
+      await txnRef.update({
+        status: "rejected",
+        reason
+      });
+
+      return res.json({ status: "REJECTED" });
+    }
+
+    // ✅ Approve
+    await txnRef.update({
+      status: "success",
+      reason: "Approved by admin"
+    });
+
+    res.json({ status: "APPROVED" });
+
+  } catch (err) {
+    console.error("ADMIN WITHDRAW ERROR:", err);
     res.status(500).json({ error: "Server error" });
   }
 });
