@@ -124,7 +124,7 @@ app.post("/create-payment", verifyFirebaseToken, async (req, res) => {
 
     const orderId = "ORD" + Date.now();
     const redirectUrl =
-      "https://imaginative-lolly-654a8a.netlify.app/wallet.html?order_id=" + orderId;
+      "wallet.html?order_id=" + orderId;
 
     const body = new URLSearchParams({
       token_key: process.env.ZAPUPI_API_KEY,
