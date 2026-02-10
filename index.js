@@ -124,7 +124,7 @@ app.post("/create-payment", verifyFirebaseToken, async (req, res) => {
 
     const orderId = "ORD" + Date.now();
     const redirectUrl =
-      "wallet.html?order_id=" + orderId;
+      "https://testingwithme.infinityfree.me/wallet.html?order_id=" + orderId;
 
     const body = new URLSearchParams({
       token_key: process.env.ZAPUPI_API_KEY,
