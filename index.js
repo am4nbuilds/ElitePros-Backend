@@ -185,7 +185,7 @@ app.post("/verify-payment", verifyFirebaseToken, async (req, res) => {
     await walletRef.transaction((currentWallet) => {
       if (currentWallet === null) {
         return {
-          deposit: amount,
+          deposited: amount,
           winnings: 0,
           total: amount
         };
