@@ -110,7 +110,7 @@ app.post("/create-payment", verifyFirebaseToken, async (req, res) => {
 });
 
 /* ======================================================
-   VERIFY PAYMENT
+   VERIFY PAYMENT (DOUBLE CREDIT PROTECTED)
 ====================================================== */
 app.post("/verify-payment", verifyFirebaseToken, async (req, res) => {
   try {
@@ -120,13 +120,26 @@ app.post("/verify-payment", verifyFirebaseToken, async (req, res) => {
     if (!orderId) return res.status(400).json({ error: "Missing orderId" });
 
     const txnRef = db.ref(`users/${uid}/transactions/${orderId}`);
-    const snap = await txnRef.once("value");
 
-    if (!snap.exists()) return res.json({ status: "NOT_FOUND" });
-    if (snap.val().status === "success") return res.json({ status: "SUCCESS" });
+    /* STEP 1: LOCK TRANSACTION */
+    const lockResult = await txnRef.transaction(txn => {
+      if (!txn) return txn;
+      if (txn.status === "success") return txn;
+      if (txn.status === "verifying") return; // someone else verifying
+      txn.status = "verifying";
+      return txn;
+    });
 
-    const amount = Number(snap.val().amount);
+    if (!lockResult.committed)
+      return res.json({ status: "PENDING" });
 
+    const txn = lockResult.snapshot.val();
+    if (txn.status === "success")
+      return res.json({ status: "SUCCESS" });
+
+    const amount = Number(txn.amount);
+
+    /* STEP 2: CHECK GATEWAY */
     const body = new URLSearchParams({
       token_key: process.env.ZAPUPI_API_KEY,
       secret_key: process.env.ZAPUPI_SECRET_KEY,
@@ -141,13 +154,16 @@ app.post("/verify-payment", verifyFirebaseToken, async (req, res) => {
 
     const zapupi = JSON.parse(await statusRes.text());
 
-    if (zapupi.payment_status !== "SUCCESS")
+    if (zapupi.payment_status !== "SUCCESS") {
+      await txnRef.update({ status: "pending" });
       return res.json({ status: "PENDING" });
+    }
 
-    /* ⭐ CORRECT PATH HERE ⭐ */
+    /* STEP 3: CREDIT WALLET SAFELY */
     await db.ref(`users/${uid}/wallet/deposited`)
       .transaction(v => (Number(v) || 0) + amount);
 
+    /* STEP 4: FINALIZE */
     await txnRef.update({ status: "success" });
 
     res.json({ status: "SUCCESS", amount });
