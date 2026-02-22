@@ -120,25 +120,31 @@ app.post("/create-payment", verifyFirebaseToken, async (req, res) => {
 });
 
 /* ======================================================
-   🔥 ZAPUPI WEBHOOK (ONLY PAYMENT CONFIRMATION SOURCE)
+   🔥 ZAPUPI WEBHOOK
 ====================================================== */
 app.post("/zapupi-webhook", async (req, res) => {
   try {
     console.log("🔥 Webhook hit:", req.body);
 
-    const { order_id, payment_status } = req.body;
+    const { order_id, status, amount } = req.body;
 
-    if (!order_id || payment_status !== "SUCCESS")
+    if (!order_id || !status)
+      return res.status(400).send("Invalid webhook");
+
+    const normalizedStatus = String(status).toLowerCase();
+
+    if (normalizedStatus !== "success")
       return res.status(200).send("Ignored");
 
+    /* Get order mapping */
     const orderSnap = await db.ref(`orders/${order_id}`).once("value");
 
     if (!orderSnap.exists())
       return res.status(404).send("Order not found");
 
-    const { uid, amount, status } = orderSnap.val();
+    const { uid, status: currentStatus } = orderSnap.val();
 
-    if (status === "success")
+    if (currentStatus === "success")
       return res.status(200).send("Already processed");
 
     const txnRef = db.ref(`users/${uid}/transactions/${order_id}`);
