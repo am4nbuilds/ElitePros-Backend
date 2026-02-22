@@ -94,7 +94,6 @@ app.post("/create-payment", verifyFirebaseToken, async (req, res) => {
     if (zapupi.status !== "success")
       return res.status(502).json({ error: "Gateway error" });
 
-    /* Store user transaction */
     await db.ref(`users/${uid}/transactions/${orderId}`).set({
       transactionId: orderId,
       type: "deposit",
@@ -103,7 +102,6 @@ app.post("/create-payment", verifyFirebaseToken, async (req, res) => {
       timestamp: Date.now()
     });
 
-    /* Store order mapping */
     await db.ref(`orders/${orderId}`).set({
       uid,
       amount,
@@ -121,7 +119,7 @@ app.post("/create-payment", verifyFirebaseToken, async (req, res) => {
 });
 
 /* ======================================================
-   🔐 SECURE WEBHOOK (VERIFIED SERVER-SIDE)
+   🔐 SECURE WEBHOOK (PROPER VERIFICATION)
 ====================================================== */
 app.post("/zapupi-webhook", async (req, res) => {
   try {
@@ -152,7 +150,7 @@ app.post("/zapupi-webhook", async (req, res) => {
 
     const { uid, amount: storedAmount } = order;
 
-    /* VERIFY WITH ZAPUPI SERVER-TO-SERVER */
+    /* VERIFY WITH ZAPUPI SERVER-SIDE */
     const verifyBody = new URLSearchParams({
       token_key: process.env.ZAPUPI_API_KEY,
       secret_key: process.env.ZAPUPI_SECRET_KEY,
@@ -169,16 +167,19 @@ app.post("/zapupi-webhook", async (req, res) => {
 
     console.log("Gateway verify response:", zapupi);
 
-    if (String(zapupi.status).toLowerCase() !== "success") {
+    /* 🔥 THIS IS THE REAL FIX 🔥 */
+    if (
+      !zapupi.data ||
+      String(zapupi.data.status).toLowerCase() !== "success"
+    ) {
       await orderRef.update({ locked: false });
       return res.status(200).send("Not paid");
     }
 
-    /* CREDIT WALLET USING STORED AMOUNT */
+    /* CREDIT USING STORED AMOUNT ONLY */
     await db.ref(`users/${uid}/wallet/deposited`)
       .transaction(v => (Number(v) || 0) + Number(storedAmount));
 
-    /* UPDATE DATABASE */
     await db.ref().update({
       [`orders/${order_id}/status`]: "success",
       [`orders/${order_id}/locked`]: false,
