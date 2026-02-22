@@ -25,7 +25,7 @@ for (const key of REQUIRED_ENV) {
 /* ================= MIDDLEWARE ================= */
 app.use(cors({ origin: true }));
 app.use(express.json());
-app.use(express.urlencoded({ extended: true })); // for webhook form-data
+app.use(express.urlencoded({ extended: true }));
 
 /* ================= FIREBASE ================= */
 if (!admin.apps.length) {
@@ -94,12 +94,21 @@ app.post("/create-payment", verifyFirebaseToken, async (req, res) => {
     if (zapupi.status !== "success")
       return res.status(502).json({ error: "Gateway error", zapupi });
 
+    /* Save transaction */
     await db.ref(`users/${uid}/transactions/${orderId}`).set({
       transactionId: orderId,
       type: "deposit",
       amount,
       status: "pending",
       timestamp: Date.now()
+    });
+
+    /* Save order mapping */
+    await db.ref(`orders/${orderId}`).set({
+      uid,
+      amount,
+      status: "pending",
+      createdAt: Date.now()
     });
 
     res.json({ order_id: orderId, payment_url: zapupi.payment_url });
@@ -115,53 +124,49 @@ app.post("/create-payment", verifyFirebaseToken, async (req, res) => {
 ====================================================== */
 app.post("/zapupi-webhook", async (req, res) => {
   try {
-    const {
-      order_id,
-      payment_status,
-      amount,
-      signature
-    } = req.body;
+    console.log("🔥 Webhook hit:", req.body);
 
-    if (!order_id || !payment_status)
-      return res.status(400).send("Invalid webhook");
+    const { order_id, payment_status } = req.body;
 
-    // OPTIONAL: Add signature verification here if Zapupi provides hashing
-
-    if (payment_status !== "SUCCESS") {
+    if (!order_id || payment_status !== "SUCCESS")
       return res.status(200).send("Ignored");
-    }
 
-    // Find transaction
-    const txnSnap = await db.ref("users").once("value");
+    const orderSnap = await db.ref(`orders/${order_id}`).once("value");
 
-    let found = false;
+    if (!orderSnap.exists())
+      return res.status(404).send("Order not found");
 
-    txnSnap.forEach(userSnap => {
-      const uid = userSnap.key;
-      const txnRef = db.ref(`users/${uid}/transactions/${order_id}`);
+    const { uid, amount, status } = orderSnap.val();
 
-      txnRef.transaction(txn => {
-        if (!txn) return txn;
+    if (status === "success")
+      return res.status(200).send("Already processed");
 
-        // Already credited
-        if (txn.status === "success") {
-          found = true;
-          return txn;
-        }
+    const txnRef = db.ref(`users/${uid}/transactions/${order_id}`);
+    const txnSnap = await txnRef.once("value");
 
-        if (txn.status !== "pending") return txn;
+    if (!txnSnap.exists())
+      return res.status(404).send("Transaction missing");
 
-        txn.status = "success";
-        txn.confirmedAt = Date.now();
-        found = true;
+    if (txnSnap.val().status === "success")
+      return res.status(200).send("Already credited");
 
-        // Credit wallet atomically
-        db.ref(`users/${uid}/wallet/deposited`)
-          .transaction(v => (Number(v) || 0) + Number(txn.amount));
+    /* Credit wallet safely */
+    await db.ref(`users/${uid}/wallet/deposited`)
+      .transaction(v => (Number(v) || 0) + Number(amount));
 
-        return txn;
-      });
+    /* Update transaction */
+    await txnRef.update({
+      status: "success",
+      confirmedAt: Date.now()
     });
+
+    /* Update order */
+    await db.ref(`orders/${order_id}`).update({
+      status: "success",
+      confirmedAt: Date.now()
+    });
+
+    console.log("✅ Payment credited:", order_id);
 
     return res.status(200).send("OK");
 
