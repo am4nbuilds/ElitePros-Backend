@@ -92,9 +92,9 @@ app.post("/create-payment", verifyFirebaseToken, async (req, res) => {
     const zapupi = JSON.parse(await zapupiRes.text());
 
     if (zapupi.status !== "success")
-      return res.status(502).json({ error: "Gateway error", zapupi });
+      return res.status(502).json({ error: "Gateway error" });
 
-    /* Store transaction */
+    /* Store user transaction */
     await db.ref(`users/${uid}/transactions/${orderId}`).set({
       transactionId: orderId,
       type: "deposit",
@@ -121,7 +121,7 @@ app.post("/create-payment", verifyFirebaseToken, async (req, res) => {
 });
 
 /* ======================================================
-   🔐 SECURE WEBHOOK
+   🔐 SECURE WEBHOOK (VERIFIED SERVER-SIDE)
 ====================================================== */
 app.post("/zapupi-webhook", async (req, res) => {
   try {
@@ -130,12 +130,13 @@ app.post("/zapupi-webhook", async (req, res) => {
     const { order_id } = req.body;
     if (!order_id) return res.status(400).send("Invalid webhook");
 
-    /* STEP 1: Fetch order */
     const orderRef = db.ref(`orders/${order_id}`);
+
+    /* LOCK ORDER */
     const lockResult = await orderRef.transaction(order => {
       if (!order) return order;
       if (order.status === "success") return order;
-      if (order.locked === true) return; // prevent race
+      if (order.locked === true) return;
       order.locked = true;
       return order;
     });
@@ -151,8 +152,8 @@ app.post("/zapupi-webhook", async (req, res) => {
 
     const { uid, amount: storedAmount } = order;
 
-    /* STEP 2: VERIFY WITH ZAPUPI DIRECTLY */
-    const body = new URLSearchParams({
+    /* VERIFY WITH ZAPUPI SERVER-TO-SERVER */
+    const verifyBody = new URLSearchParams({
       token_key: process.env.ZAPUPI_API_KEY,
       secret_key: process.env.ZAPUPI_SECRET_KEY,
       order_id
@@ -161,21 +162,23 @@ app.post("/zapupi-webhook", async (req, res) => {
     const verifyRes = await fetch("https://api.zapupi.com/api/order-status", {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: body.toString()
+      body: verifyBody.toString()
     });
 
     const zapupi = JSON.parse(await verifyRes.text());
+
+    console.log("Gateway verify response:", zapupi);
 
     if (String(zapupi.status).toLowerCase() !== "success") {
       await orderRef.update({ locked: false });
       return res.status(200).send("Not paid");
     }
 
-    /* STEP 3: CREDIT USING STORED AMOUNT ONLY */
+    /* CREDIT WALLET USING STORED AMOUNT */
     await db.ref(`users/${uid}/wallet/deposited`)
       .transaction(v => (Number(v) || 0) + Number(storedAmount));
 
-    /* STEP 4: UPDATE RECORDS */
+    /* UPDATE DATABASE */
     await db.ref().update({
       [`orders/${order_id}/status`]: "success",
       [`orders/${order_id}/locked`]: false,
@@ -184,7 +187,7 @@ app.post("/zapupi-webhook", async (req, res) => {
       [`users/${uid}/transactions/${order_id}/confirmedAt`]: Date.now()
     });
 
-    console.log("Payment credited securely:", order_id);
+    console.log("Payment securely credited:", order_id);
 
     return res.status(200).send("OK");
 
