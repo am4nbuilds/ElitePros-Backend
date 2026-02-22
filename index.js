@@ -94,7 +94,7 @@ app.post("/create-payment", verifyFirebaseToken, async (req, res) => {
     if (zapupi.status !== "success")
       return res.status(502).json({ error: "Gateway error", zapupi });
 
-    /* Save transaction */
+    /* Store transaction */
     await db.ref(`users/${uid}/transactions/${orderId}`).set({
       transactionId: orderId,
       type: "deposit",
@@ -103,11 +103,12 @@ app.post("/create-payment", verifyFirebaseToken, async (req, res) => {
       timestamp: Date.now()
     });
 
-    /* Save order mapping */
+    /* Store order mapping */
     await db.ref(`orders/${orderId}`).set({
       uid,
       amount,
       status: "pending",
+      locked: false,
       createdAt: Date.now()
     });
 
@@ -120,59 +121,70 @@ app.post("/create-payment", verifyFirebaseToken, async (req, res) => {
 });
 
 /* ======================================================
-   🔥 ZAPUPI WEBHOOK
+   🔐 SECURE WEBHOOK
 ====================================================== */
 app.post("/zapupi-webhook", async (req, res) => {
   try {
-    console.log("🔥 Webhook hit:", req.body);
+    console.log("Webhook hit:", req.body);
 
-    const { order_id, status, amount } = req.body;
+    const { order_id } = req.body;
+    if (!order_id) return res.status(400).send("Invalid webhook");
 
-    if (!order_id || !status)
-      return res.status(400).send("Invalid webhook");
+    /* STEP 1: Fetch order */
+    const orderRef = db.ref(`orders/${order_id}`);
+    const lockResult = await orderRef.transaction(order => {
+      if (!order) return order;
+      if (order.status === "success") return order;
+      if (order.locked === true) return; // prevent race
+      order.locked = true;
+      return order;
+    });
 
-    const normalizedStatus = String(status).toLowerCase();
+    if (!lockResult.committed)
+      return res.status(200).send("Already processing");
 
-    if (normalizedStatus !== "success")
-      return res.status(200).send("Ignored");
+    const order = lockResult.snapshot.val();
+    if (!order) return res.status(404).send("Order not found");
 
-    /* Get order mapping */
-    const orderSnap = await db.ref(`orders/${order_id}`).once("value");
-
-    if (!orderSnap.exists())
-      return res.status(404).send("Order not found");
-
-    const { uid, status: currentStatus } = orderSnap.val();
-
-    if (currentStatus === "success")
+    if (order.status === "success")
       return res.status(200).send("Already processed");
 
-    const txnRef = db.ref(`users/${uid}/transactions/${order_id}`);
-    const txnSnap = await txnRef.once("value");
+    const { uid, amount: storedAmount } = order;
 
-    if (!txnSnap.exists())
-      return res.status(404).send("Transaction missing");
+    /* STEP 2: VERIFY WITH ZAPUPI DIRECTLY */
+    const body = new URLSearchParams({
+      token_key: process.env.ZAPUPI_API_KEY,
+      secret_key: process.env.ZAPUPI_SECRET_KEY,
+      order_id
+    });
 
-    if (txnSnap.val().status === "success")
-      return res.status(200).send("Already credited");
+    const verifyRes = await fetch("https://api.zapupi.com/api/order-status", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: body.toString()
+    });
 
-    /* Credit wallet safely */
+    const zapupi = JSON.parse(await verifyRes.text());
+
+    if (String(zapupi.status).toLowerCase() !== "success") {
+      await orderRef.update({ locked: false });
+      return res.status(200).send("Not paid");
+    }
+
+    /* STEP 3: CREDIT USING STORED AMOUNT ONLY */
     await db.ref(`users/${uid}/wallet/deposited`)
-      .transaction(v => (Number(v) || 0) + Number(amount));
+      .transaction(v => (Number(v) || 0) + Number(storedAmount));
 
-    /* Update transaction */
-    await txnRef.update({
-      status: "success",
-      confirmedAt: Date.now()
+    /* STEP 4: UPDATE RECORDS */
+    await db.ref().update({
+      [`orders/${order_id}/status`]: "success",
+      [`orders/${order_id}/locked`]: false,
+      [`orders/${order_id}/confirmedAt`]: Date.now(),
+      [`users/${uid}/transactions/${order_id}/status`]: "success",
+      [`users/${uid}/transactions/${order_id}/confirmedAt`]: Date.now()
     });
 
-    /* Update order */
-    await db.ref(`orders/${order_id}`).update({
-      status: "success",
-      confirmedAt: Date.now()
-    });
-
-    console.log("✅ Payment credited:", order_id);
+    console.log("Payment credited securely:", order_id);
 
     return res.status(200).send("OK");
 
@@ -184,5 +196,5 @@ app.post("/zapupi-webhook", async (req, res) => {
 
 /* ================= START ================= */
 app.listen(process.env.PORT || 3000, () =>
-  console.log("Server running")
+  console.log("Server running securely")
 );
