@@ -25,6 +25,7 @@ for (const key of REQUIRED_ENV) {
 /* ================= MIDDLEWARE ================= */
 app.use(cors({ origin: true }));
 app.use(express.json());
+app.use(express.urlencoded({ extended: true })); // for webhook form-data
 
 /* ================= FIREBASE ================= */
 if (!admin.apps.length) {
@@ -71,7 +72,7 @@ app.post("/create-payment", verifyFirebaseToken, async (req, res) => {
     const orderId = "ORD" + Date.now();
 
     const redirectUrl =
-      "https://testingwithme.infinityfree.me/wallet.html?order_id=" + orderId;
+      "https://testingwithme.infinityfree.me/wallet.html";
 
     const body = new URLSearchParams({
       token_key: process.env.ZAPUPI_API_KEY,
@@ -110,67 +111,63 @@ app.post("/create-payment", verifyFirebaseToken, async (req, res) => {
 });
 
 /* ======================================================
-   VERIFY PAYMENT (DOUBLE CREDIT PROTECTED)
+   🔥 ZAPUPI WEBHOOK (ONLY PAYMENT CONFIRMATION SOURCE)
 ====================================================== */
-app.post("/verify-payment", verifyFirebaseToken, async (req, res) => {
+app.post("/zapupi-webhook", async (req, res) => {
   try {
-    const uid = req.uid;
-    const { orderId } = req.body;
+    const {
+      order_id,
+      payment_status,
+      amount,
+      signature
+    } = req.body;
 
-    if (!orderId) return res.status(400).json({ error: "Missing orderId" });
+    if (!order_id || !payment_status)
+      return res.status(400).send("Invalid webhook");
 
-    const txnRef = db.ref(`users/${uid}/transactions/${orderId}`);
+    // OPTIONAL: Add signature verification here if Zapupi provides hashing
 
-    /* STEP 1: LOCK TRANSACTION */
-    const lockResult = await txnRef.transaction(txn => {
-      if (!txn) return txn;
-      if (txn.status === "success") return txn;
-      if (txn.status === "verifying") return; // someone else verifying
-      txn.status = "verifying";
-      return txn;
-    });
-
-    if (!lockResult.committed)
-      return res.json({ status: "PENDING" });
-
-    const txn = lockResult.snapshot.val();
-    if (txn.status === "success")
-      return res.json({ status: "SUCCESS" });
-
-    const amount = Number(txn.amount);
-
-    /* STEP 2: CHECK GATEWAY */
-    const body = new URLSearchParams({
-      token_key: process.env.ZAPUPI_API_KEY,
-      secret_key: process.env.ZAPUPI_SECRET_KEY,
-      order_id: orderId
-    });
-
-    const statusRes = await fetch("https://api.zapupi.com/api/order-status", {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: body.toString()
-    });
-
-    const zapupi = JSON.parse(await statusRes.text());
-
-    if (zapupi.payment_status !== "SUCCESS") {
-      await txnRef.update({ status: "pending" });
-      return res.json({ status: "PENDING" });
+    if (payment_status !== "SUCCESS") {
+      return res.status(200).send("Ignored");
     }
 
-    /* STEP 3: CREDIT WALLET SAFELY */
-    await db.ref(`users/${uid}/wallet/deposited`)
-      .transaction(v => (Number(v) || 0) + amount);
+    // Find transaction
+    const txnSnap = await db.ref("users").once("value");
 
-    /* STEP 4: FINALIZE */
-    await txnRef.update({ status: "success" });
+    let found = false;
 
-    res.json({ status: "SUCCESS", amount });
+    txnSnap.forEach(userSnap => {
+      const uid = userSnap.key;
+      const txnRef = db.ref(`users/${uid}/transactions/${order_id}`);
 
-  } catch (e) {
-    console.error("VERIFY ERROR:", e);
-    res.status(500).json({ status: "PENDING" });
+      txnRef.transaction(txn => {
+        if (!txn) return txn;
+
+        // Already credited
+        if (txn.status === "success") {
+          found = true;
+          return txn;
+        }
+
+        if (txn.status !== "pending") return txn;
+
+        txn.status = "success";
+        txn.confirmedAt = Date.now();
+        found = true;
+
+        // Credit wallet atomically
+        db.ref(`users/${uid}/wallet/deposited`)
+          .transaction(v => (Number(v) || 0) + Number(txn.amount));
+
+        return txn;
+      });
+    });
+
+    return res.status(200).send("OK");
+
+  } catch (err) {
+    console.error("WEBHOOK ERROR:", err);
+    return res.status(500).send("Error");
   }
 });
 
