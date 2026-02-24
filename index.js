@@ -197,42 +197,42 @@ app.post("/zapupi-webhook", async (req, res) => {
     return res.status(500).send("Error");
   }
 });
-/* ======================================================
-   🔐 SECURE JOIN MATCH (RACE CONDITION PROOF)
+      /* ======================================================
+   🔐 SECURE JOIN MATCH (OBJECT-BASED SLOT SYSTEM)
 ====================================================== */
 app.post("/join-match", verifyFirebaseToken, async (req, res) => {
   try {
     const uid = req.uid;
     const { matchId, ign } = req.body;
 
-    if (!matchId || !ign || ign.trim().length < 1)
+    if (!matchId || !ign || ign.trim().length === 0)
       return res.status(400).json({ error: "INVALID_DATA" });
 
     const matchRef = db.ref(`matches/${matchId}`);
-    const userWalletRef = db.ref(`users/${uid}/wallet`);
+    const walletRef = db.ref(`users/${uid}/wallet`);
     const playerRef = db.ref(`matches/${matchId}/players/${uid}`);
-    const joinedRef = db.ref(`users/${uid}/myMatches/${matchId}`);
 
     /* ===============================
-       STEP 1: CHECK ALREADY JOINED
-    =============================== */
-    const alreadySnap = await playerRef.once("value");
-    if (alreadySnap.exists())
-      return res.json({ error: "ALREADY_JOINED" });
-
-    /* ===============================
-       STEP 2: ATOMIC MATCH SLOT LOCK
+       STEP 1: LOCK SLOT (RACE SAFE)
     =============================== */
     const matchTxn = await matchRef.transaction(match => {
       if (!match) return match;
 
-      if (!match.players) match.players = 0;
+      if (!match.players) match.players = {};
 
-      if (match.players >= match.slots) {
-        return; // abort
+      const currentCount = Object.keys(match.players).length;
+
+      if (currentCount >= match.slots) {
+        return; // abort if full
       }
 
-      match.players += 1;
+      if (match.players[uid]) {
+        return match; // already joined
+      }
+
+      // temporary lock entry
+      match.players[uid] = { _locking: true };
+
       return match;
     });
 
@@ -240,19 +240,28 @@ app.post("/join-match", verifyFirebaseToken, async (req, res) => {
       return res.json({ error: "MATCH_FULL" });
 
     const matchData = matchTxn.snapshot.val();
+
+    if (matchData.players?.[uid] && !matchData.players[uid]._locking)
+      return res.json({ error: "ALREADY_JOINED" });
+
     const entryFee = Number(matchData.entryFee || 0);
 
+    if (!Number.isFinite(entryFee) || entryFee <= 0) {
+      await playerRef.remove();
+      return res.status(400).json({ error: "INVALID_ENTRY_FEE" });
+    }
+
     /* ===============================
-       STEP 3: ATOMIC WALLET DEDUCTION
-       deposit first, then winnings
+       STEP 2: WALLET DEDUCTION
     =============================== */
-    const walletTxn = await userWalletRef.transaction(wallet => {
+    const walletTxn = await walletRef.transaction(wallet => {
       if (!wallet) wallet = { deposited: 0, winnings: 0 };
 
       let deposited = Number(wallet.deposited || 0);
       let winnings = Number(wallet.winnings || 0);
 
       const total = deposited + winnings;
+
       if (total < entryFee) return; // abort
 
       let depositUsed = 0;
@@ -271,30 +280,28 @@ app.post("/join-match", verifyFirebaseToken, async (req, res) => {
       wallet.deposited = deposited;
       wallet.winnings = winnings;
 
-      wallet._deductionMeta = {
-        depositUsed,
-        winningsUsed
-      };
+      wallet._meta = { depositUsed, winningsUsed };
 
       return wallet;
     });
 
     if (!walletTxn.committed) {
       // rollback slot
-      await matchRef.child("players").transaction(p => (p || 1) - 1);
+      await playerRef.remove();
       return res.json({ error: "INSUFFICIENT_BALANCE" });
     }
 
-    const deductionMeta = walletTxn.snapshot.val()._deductionMeta;
+    const { depositUsed, winningsUsed } =
+      walletTxn.snapshot.val()._meta || {};
 
     /* ===============================
-       STEP 4: SAVE PLAYER INFO
+       STEP 3: FINALIZE PLAYER ENTRY
     =============================== */
     await db.ref().update({
       [`matches/${matchId}/players/${uid}`]: {
         ign: ign.trim(),
-        depositUsed: deductionMeta.depositUsed,
-        winningsUsed: deductionMeta.winningsUsed,
+        depositUsed,
+        winningsUsed,
         joinedAt: Date.now()
       },
       [`users/${uid}/myMatches/${matchId}`]: {
