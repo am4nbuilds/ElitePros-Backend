@@ -197,6 +197,119 @@ app.post("/zapupi-webhook", async (req, res) => {
     return res.status(500).send("Error");
   }
 });
+/* ======================================================
+   🔐 SECURE JOIN MATCH (RACE CONDITION PROOF)
+====================================================== */
+app.post("/join-match", verifyFirebaseToken, async (req, res) => {
+  try {
+    const uid = req.uid;
+    const { matchId, ign } = req.body;
+
+    if (!matchId || !ign || ign.trim().length < 1)
+      return res.status(400).json({ error: "INVALID_DATA" });
+
+    const matchRef = db.ref(`matches/${matchId}`);
+    const userWalletRef = db.ref(`users/${uid}/wallet`);
+    const playerRef = db.ref(`matches/${matchId}/players/${uid}`);
+    const joinedRef = db.ref(`users/${uid}/myMatches/${matchId}`);
+
+    /* ===============================
+       STEP 1: CHECK ALREADY JOINED
+    =============================== */
+    const alreadySnap = await playerRef.once("value");
+    if (alreadySnap.exists())
+      return res.json({ error: "ALREADY_JOINED" });
+
+    /* ===============================
+       STEP 2: ATOMIC MATCH SLOT LOCK
+    =============================== */
+    const matchTxn = await matchRef.transaction(match => {
+      if (!match) return match;
+
+      if (!match.players) match.players = 0;
+
+      if (match.players >= match.slots) {
+        return; // abort
+      }
+
+      match.players += 1;
+      return match;
+    });
+
+    if (!matchTxn.committed)
+      return res.json({ error: "MATCH_FULL" });
+
+    const matchData = matchTxn.snapshot.val();
+    const entryFee = Number(matchData.entryFee || 0);
+
+    /* ===============================
+       STEP 3: ATOMIC WALLET DEDUCTION
+       deposit first, then winnings
+    =============================== */
+    const walletTxn = await userWalletRef.transaction(wallet => {
+      if (!wallet) wallet = { deposited: 0, winnings: 0 };
+
+      let deposited = Number(wallet.deposited || 0);
+      let winnings = Number(wallet.winnings || 0);
+
+      const total = deposited + winnings;
+      if (total < entryFee) return; // abort
+
+      let depositUsed = 0;
+      let winningsUsed = 0;
+
+      if (deposited >= entryFee) {
+        depositUsed = entryFee;
+        deposited -= entryFee;
+      } else {
+        depositUsed = deposited;
+        winningsUsed = entryFee - deposited;
+        deposited = 0;
+        winnings -= winningsUsed;
+      }
+
+      wallet.deposited = deposited;
+      wallet.winnings = winnings;
+
+      wallet._deductionMeta = {
+        depositUsed,
+        winningsUsed
+      };
+
+      return wallet;
+    });
+
+    if (!walletTxn.committed) {
+      // rollback slot
+      await matchRef.child("players").transaction(p => (p || 1) - 1);
+      return res.json({ error: "INSUFFICIENT_BALANCE" });
+    }
+
+    const deductionMeta = walletTxn.snapshot.val()._deductionMeta;
+
+    /* ===============================
+       STEP 4: SAVE PLAYER INFO
+    =============================== */
+    await db.ref().update({
+      [`matches/${matchId}/players/${uid}`]: {
+        ign: ign.trim(),
+        depositUsed: deductionMeta.depositUsed,
+        winningsUsed: deductionMeta.winningsUsed,
+        joinedAt: Date.now()
+      },
+      [`users/${uid}/myMatches/${matchId}`]: {
+        joinedAt: Date.now()
+      },
+      [`users/${uid}/ign-latest`]: ign.trim()
+    });
+
+    return res.json({ status: "SUCCESS" });
+
+  } catch (err) {
+    console.error("JOIN ERROR:", err);
+    return res.status(500).json({ error: "SERVER_ERROR" });
+  }
+});
 
 /* ================= START ================= */
 app.listen(process.env.PORT || 3000, () =>
