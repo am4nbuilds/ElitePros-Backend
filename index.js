@@ -22,8 +22,37 @@ for (const key of REQUIRED_ENV) {
   }
 }
 
-/* ================= MIDDLEWARE ================= */
-app.use(cors({ origin: true }));
+/* ================= ✅ NEW SECURE CORS ================= */
+
+const allowedOrigins = [
+  "https://testingwithme.infinityfree.me",
+  "https://elitepros-backend.onrender.com"
+];
+
+app.use(cors({
+  origin: function (origin, callback) {
+
+    // allow webhook + server requests
+    if (!origin) return callback(null, true);
+
+    if (allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+
+    console.log("Blocked CORS:", origin);
+    return callback(new Error("Not allowed by CORS"));
+  },
+  methods: ["GET","POST","OPTIONS"],
+  allowedHeaders: [
+    "Content-Type",
+    "Authorization"
+  ],
+  credentials: true
+}));
+
+// VERY IMPORTANT FOR BROWSER PREFLIGHT
+app.options("*", cors());
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
@@ -33,7 +62,7 @@ if (!admin.apps.length) {
     credential: admin.credential.cert({
       projectId: process.env.FB_PROJECT_ID,
       clientEmail: process.env.FB_CLIENT_EMAIL,
-      privateKey: process.env.FB_PRIVATE_KEY.replace(/\\n/g, "\n")
+      privateKey: process.env.FB_PRIVATE_KEY.replace(/\\n/g,"\n")
     }),
     databaseURL: process.env.FB_DB_URL
   });
@@ -42,283 +71,426 @@ if (!admin.apps.length) {
 const db = admin.database();
 
 /* ================= AUTH ================= */
-async function verifyFirebaseToken(req, res, next) {
-  try {
-    const token = req.headers.authorization?.split("Bearer ")[1];
-    if (!token) return res.status(401).json({ error: "Unauthorized" });
+async function verifyFirebaseToken(req,res,next){
+  try{
+    const token =
+      req.headers.authorization?.split("Bearer ")[1];
 
-    const decoded = await admin.auth().verifyIdToken(token);
+    if(!token)
+      return res.status(401).json({error:"Unauthorized"});
+
+    const decoded =
+      await admin.auth().verifyIdToken(token);
+
     req.uid = decoded.uid;
+
     next();
-  } catch {
-    return res.status(401).json({ error: "Invalid token" });
+
+  }catch{
+    return res.status(401).json({error:"Invalid token"});
   }
 }
 
 /* ================= ROOT ================= */
-app.get("/", (_, res) => res.json({ status: "OK" }));
+app.get("/",(_,res)=>
+  res.json({status:"OK"})
+);
 
 /* ======================================================
    CREATE PAYMENT
 ====================================================== */
-app.post("/create-payment", verifyFirebaseToken, async (req, res) => {
-  try {
-    const uid = req.uid;
-    const amount = Number(req.body.amount);
+app.post(
+"/create-payment",
+verifyFirebaseToken,
+async(req,res)=>{
 
-    if (!Number.isFinite(amount) || amount < 1)
-      return res.status(400).json({ error: "Invalid amount" });
+try{
 
-    const orderId = "ORD" + Date.now();
+const uid=req.uid;
+const amount=Number(req.body.amount);
 
-    const redirectUrl =
-      "https://testingwithme.infinityfree.me/wallet.html";
+if(!Number.isFinite(amount)||amount<1)
+return res.status(400)
+.json({error:"Invalid amount"});
 
-    const body = new URLSearchParams({
-      token_key: process.env.ZAPUPI_API_KEY,
-      secret_key: process.env.ZAPUPI_SECRET_KEY,
-      amount: amount.toString(),
-      order_id: orderId,
-      remark: "Wallet Deposit",
-      redirect_url: redirectUrl
-    });
+const orderId="ORD"+Date.now();
 
-    const zapupiRes = await fetch("https://api.zapupi.com/api/create-order", {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: body.toString()
-    });
+const redirectUrl=
+"https://testingwithme.infinityfree.me/wallet.html";
 
-    const zapupi = JSON.parse(await zapupiRes.text());
+const body=new URLSearchParams({
+token_key:process.env.ZAPUPI_API_KEY,
+secret_key:process.env.ZAPUPI_SECRET_KEY,
+amount:amount.toString(),
+order_id:orderId,
+remark:"Wallet Deposit",
+redirect_url:redirectUrl
+});
 
-    if (zapupi.status !== "success")
-      return res.status(502).json({ error: "Gateway error" });
+const zapupiRes=await fetch(
+"https://api.zapupi.com/api/create-order",
+{
+method:"POST",
+headers:{
+"Content-Type":
+"application/x-www-form-urlencoded"
+},
+body:body.toString()
+});
 
-    await db.ref(`users/${uid}/transactions/${orderId}`).set({
-      transactionId: orderId,
-      type: "deposit",
-      amount,
-      status: "pending",
-      timestamp: Date.now()
-    });
+const zapupi=
+JSON.parse(await zapupiRes.text());
 
-    await db.ref(`orders/${orderId}`).set({
-      uid,
-      amount,
-      status: "pending",
-      locked: false,
-      createdAt: Date.now()
-    });
+if(zapupi.status!=="success")
+return res.status(502)
+.json({error:"Gateway error"});
 
-    res.json({ order_id: orderId, payment_url: zapupi.payment_url });
+await db.ref(
+`users/${uid}/transactions/${orderId}`
+).set({
+transactionId:orderId,
+type:"deposit",
+amount,
+status:"pending",
+timestamp:Date.now()
+});
 
-  } catch (e) {
-    console.error("CREATE PAYMENT ERROR:", e);
-    res.status(500).json({ error: "Create payment failed" });
-  }
+await db.ref(`orders/${orderId}`).set({
+uid,
+amount,
+status:"pending",
+locked:false,
+createdAt:Date.now()
+});
+
+res.json({
+order_id:orderId,
+payment_url:zapupi.payment_url
+});
+
+}catch(e){
+
+console.error(
+"CREATE PAYMENT ERROR:",
+e
+);
+
+res.status(500)
+.json({error:"Create payment failed"});
+}
 });
 
 /* ======================================================
-   🔐 SECURE WEBHOOK (PROPER VERIFICATION)
+   WEBHOOK
 ====================================================== */
-app.post("/zapupi-webhook", async (req, res) => {
-  try {
-    console.log("Webhook hit:", req.body);
+app.post("/zapupi-webhook",async(req,res)=>{
 
-    const { order_id } = req.body;
-    if (!order_id) return res.status(400).send("Invalid webhook");
+try{
 
-    const orderRef = db.ref(`orders/${order_id}`);
+console.log("Webhook hit:",req.body);
 
-    /* LOCK ORDER */
-    const lockResult = await orderRef.transaction(order => {
-      if (!order) return order;
-      if (order.status === "success") return order;
-      if (order.locked === true) return;
-      order.locked = true;
-      return order;
-    });
+const{order_id}=req.body;
 
-    if (!lockResult.committed)
-      return res.status(200).send("Already processing");
+if(!order_id)
+return res
+.status(400)
+.send("Invalid webhook");
 
-    const order = lockResult.snapshot.val();
-    if (!order) return res.status(404).send("Order not found");
+const orderRef=
+db.ref(`orders/${order_id}`);
 
-    if (order.status === "success")
-      return res.status(200).send("Already processed");
+const lockResult=
+await orderRef.transaction(order=>{
 
-    const { uid, amount: storedAmount } = order;
+if(!order)return order;
+if(order.status==="success")
+return order;
 
-    /* VERIFY WITH ZAPUPI SERVER-SIDE */
-    const verifyBody = new URLSearchParams({
-      token_key: process.env.ZAPUPI_API_KEY,
-      secret_key: process.env.ZAPUPI_SECRET_KEY,
-      order_id
-    });
+if(order.locked===true)
+return;
 
-    const verifyRes = await fetch("https://api.zapupi.com/api/order-status", {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: verifyBody.toString()
-    });
+order.locked=true;
 
-    const zapupi = JSON.parse(await verifyRes.text());
+return order;
 
-    console.log("Gateway verify response:", zapupi);
-
-    /* 🔥 THIS IS THE REAL FIX 🔥 */
-    if (
-      !zapupi.data ||
-      String(zapupi.data.status).toLowerCase() !== "success"
-    ) {
-      await orderRef.update({ locked: false });
-      return res.status(200).send("Not paid");
-    }
-
-    /* CREDIT USING STORED AMOUNT ONLY */
-    await db.ref(`users/${uid}/wallet/deposited`)
-      .transaction(v => (Number(v) || 0) + Number(storedAmount));
-
-    await db.ref().update({
-      [`orders/${order_id}/status`]: "success",
-      [`orders/${order_id}/locked`]: false,
-      [`orders/${order_id}/confirmedAt`]: Date.now(),
-      [`users/${uid}/transactions/${order_id}/status`]: "success",
-      [`users/${uid}/transactions/${order_id}/confirmedAt`]: Date.now()
-    });
-
-    console.log("Payment securely credited:", order_id);
-
-    return res.status(200).send("OK");
-
-  } catch (err) {
-    console.error("WEBHOOK ERROR:", err);
-    return res.status(500).send("Error");
-  }
 });
-      /* ======================================================
-   🔐 SECURE JOIN MATCH (OBJECT-BASED SLOT SYSTEM)
+
+if(!lockResult.committed)
+return res
+.status(200)
+.send("Already processing");
+
+const order=
+lockResult.snapshot.val();
+
+if(!order)
+return res
+.status(404)
+.send("Order not found");
+
+const{uid,amount}=order;
+
+const verifyBody=
+new URLSearchParams({
+
+token_key:
+process.env.ZAPUPI_API_KEY,
+
+secret_key:
+process.env.ZAPUPI_SECRET_KEY,
+
+order_id
+});
+
+const verifyRes=
+await fetch(
+"https://api.zapupi.com/api/order-status",
+{
+method:"POST",
+headers:{
+"Content-Type":
+"application/x-www-form-urlencoded"
+},
+body:verifyBody.toString()
+});
+
+const zapupi=
+JSON.parse(await verifyRes.text());
+
+console.log(
+"Gateway verify response:",
+zapupi
+);
+
+if(
+!zapupi.data||
+String(
+zapupi.data.status
+).toLowerCase()!=="success"
+){
+
+await orderRef.update({
+locked:false
+});
+
+return res
+.status(200)
+.send("Not paid");
+}
+
+await db.ref(
+`users/${uid}/wallet/deposited`
+).transaction(
+v=>(Number(v)||0)+Number(amount)
+);
+
+await db.ref().update({
+
+[`orders/${order_id}/status`]:"success",
+[`orders/${order_id}/locked`]:false,
+
+[`users/${uid}/transactions/${order_id}/status`]:
+"success",
+
+[`users/${uid}/transactions/${order_id}/confirmedAt`]:
+Date.now()
+
+});
+
+console.log(
+"Payment securely credited:",
+order_id
+);
+
+return res.status(200).send("OK");
+
+}catch(err){
+
+console.error(
+"WEBHOOK ERROR:",
+err
+);
+
+return res
+.status(500)
+.send("Error");
+}
+});
+
+/* ======================================================
+   JOIN MATCH
 ====================================================== */
-app.post("/join-match", verifyFirebaseToken, async (req, res) => {
-  try {
-    const uid = req.uid;
-    const { matchId, ign } = req.body;
+app.post(
+"/join-match",
+verifyFirebaseToken,
+async(req,res)=>{
 
-    if (!matchId || !ign || ign.trim().length === 0)
-      return res.status(400).json({ error: "INVALID_DATA" });
+try{
 
-    const matchRef = db.ref(`matches/${matchId}`);
-    const walletRef = db.ref(`users/${uid}/wallet`);
-    const playerRef = db.ref(`matches/${matchId}/players/${uid}`);
+const uid=req.uid;
+const{matchId,ign}=req.body;
 
-    /* ===============================
-       STEP 1: LOCK SLOT (RACE SAFE)
-    =============================== */
-    const matchTxn = await matchRef.transaction(match => {
-      if (!match) return match;
+if(!matchId||!ign)
+return res
+.status(400)
+.json({error:"INVALID_DATA"});
 
-      if (!match.players) match.players = {};
+const matchRef=
+db.ref(`matches/${matchId}`);
 
-      const currentCount = Object.keys(match.players).length;
+const walletRef=
+db.ref(`users/${uid}/wallet`);
 
-      if (currentCount >= match.slots) {
-        return; // abort if full
-      }
+const playerRef=
+db.ref(
+`matches/${matchId}/players/${uid}`
+);
 
-      if (match.players[uid]) {
-        return match; // already joined
-      }
+/* SLOT LOCK */
+const matchTxn=
+await matchRef.transaction(match=>{
 
-      // temporary lock entry
-      match.players[uid] = { _locking: true };
+if(!match)return match;
 
-      return match;
-    });
+if(!match.players)
+match.players={};
 
-    if (!matchTxn.committed)
-      return res.json({ error: "MATCH_FULL" });
+const count=
+Object.keys(
+match.players
+).length;
 
-    const matchData = matchTxn.snapshot.val();
+if(count>=match.slots)
+return;
 
-    if (matchData.players?.[uid] && !matchData.players[uid]._locking)
-      return res.json({ error: "ALREADY_JOINED" });
+if(match.players[uid])
+return match;
 
-    const entryFee = Number(matchData.entryFee || 0);
+match.players[uid]={
+_locking:true
+};
 
-    if (!Number.isFinite(entryFee) || entryFee <= 0) {
-      await playerRef.remove();
-      return res.status(400).json({ error: "INVALID_ENTRY_FEE" });
-    }
+return match;
 
-    /* ===============================
-       STEP 2: WALLET DEDUCTION
-    =============================== */
-    const walletTxn = await walletRef.transaction(wallet => {
-      if (!wallet) wallet = { deposited: 0, winnings: 0 };
+});
 
-      let deposited = Number(wallet.deposited || 0);
-      let winnings = Number(wallet.winnings || 0);
+if(!matchTxn.committed)
+return res.json({
+error:"MATCH_FULL"
+});
 
-      const total = deposited + winnings;
+const matchData=
+matchTxn.snapshot.val();
 
-      if (total < entryFee) return; // abort
+const entryFee=
+Number(
+matchData.entryFee||0
+);
 
-      let depositUsed = 0;
-      let winningsUsed = 0;
+/* WALLET */
+const walletTxn=
+await walletRef.transaction(wallet=>{
 
-      if (deposited >= entryFee) {
-        depositUsed = entryFee;
-        deposited -= entryFee;
-      } else {
-        depositUsed = deposited;
-        winningsUsed = entryFee - deposited;
-        deposited = 0;
-        winnings -= winningsUsed;
-      }
+if(!wallet)
+wallet={
+deposited:0,
+winnings:0
+};
 
-      wallet.deposited = deposited;
-      wallet.winnings = winnings;
+let dep=
+Number(wallet.deposited||0);
 
-      wallet._meta = { depositUsed, winningsUsed };
+let win=
+Number(wallet.winnings||0);
 
-      return wallet;
-    });
+if(dep+win<entryFee)
+return;
 
-    if (!walletTxn.committed) {
-      // rollback slot
-      await playerRef.remove();
-      return res.json({ error: "INSUFFICIENT_BALANCE" });
-    }
+let depositUsed=0;
+let winningsUsed=0;
 
-    const { depositUsed, winningsUsed } =
-      walletTxn.snapshot.val()._meta || {};
+if(dep>=entryFee){
 
-    /* ===============================
-       STEP 3: FINALIZE PLAYER ENTRY
-    =============================== */
-    await db.ref().update({
-      [`matches/${matchId}/players/${uid}`]: {
-        ign: ign.trim(),
-        depositUsed,
-        winningsUsed,
-        joinedAt: Date.now()
-      },
-      [`users/${uid}/myMatches/${matchId}`]: {
-        joinedAt: Date.now()
-      },
-      [`users/${uid}/ign-latest`]: ign.trim()
-    });
+depositUsed=entryFee;
+dep-=entryFee;
 
-    return res.json({ status: "SUCCESS" });
+}else{
 
-  } catch (err) {
-    console.error("JOIN ERROR:", err);
-    return res.status(500).json({ error: "SERVER_ERROR" });
-  }
+depositUsed=dep;
+winningsUsed=
+entryFee-dep;
+
+dep=0;
+win-=winningsUsed;
+}
+
+wallet.deposited=dep;
+wallet.winnings=win;
+
+wallet._meta={
+depositUsed,
+winningsUsed
+};
+
+return wallet;
+
+});
+
+if(!walletTxn.committed){
+
+await playerRef.remove();
+
+return res.json({
+error:"INSUFFICIENT_BALANCE"
+});
+}
+
+const{
+depositUsed,
+winningsUsed
+}=
+walletTxn.snapshot
+.val()._meta||{};
+
+await db.ref().update({
+
+[`matches/${matchId}/players/${uid}`]:{
+ign,
+depositUsed,
+winningsUsed,
+joinedAt:Date.now()
+},
+
+[`users/${uid}/myMatches/${matchId}`]:{
+joinedAt:Date.now()
+},
+
+[`users/${uid}/ign-latest`]:ign
+
+});
+
+res.json({
+status:"SUCCESS"
+});
+
+}catch(err){
+
+console.error(
+"JOIN ERROR:",
+err
+);
+
+res.status(500)
+.json({
+error:"SERVER_ERROR"
+});
+}
 });
 
 /* ================= START ================= */
-app.listen(process.env.PORT || 3000, () =>
-  console.log("Server running securely")
+app.listen(
+process.env.PORT||3000,
+()=>console.log(
+"Server running securely"
+)
 );
