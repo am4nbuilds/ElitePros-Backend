@@ -6,62 +6,63 @@ import fetch from "node-fetch";
 const app = express();
 
 /* ================= ENV ================= */
+
 const REQUIRED_ENV = [
-  "FB_PROJECT_ID",
-  "FB_CLIENT_EMAIL",
-  "FB_PRIVATE_KEY",
-  "FB_DB_URL",
-  "ZAPUPI_API_KEY",
-  "ZAPUPI_SECRET_KEY"
+"FB_PROJECT_ID",
+"FB_CLIENT_EMAIL",
+"FB_PRIVATE_KEY",
+"FB_DB_URL",
+"ZAPUPI_API_KEY",
+"ZAPUPI_SECRET_KEY"
 ];
 
 for (const key of REQUIRED_ENV) {
-  if (!process.env[key]) {
-    console.error(`Missing ENV variable: ${key}`);
-    process.exit(1);
-  }
+if (!process.env[key]) {
+console.error(`Missing ENV variable: ${key}`);
+process.exit(1);
+}
 }
 
 /* ================= CORS ================= */
 
 const allowedOrigins = [
-  "https://testingwithme.infinityfree.me",
-  "https://elitepros-backend.onrender.com"
+"https://testingwithme.infinityfree.me",
+"https://elitepros-backend.onrender.com"
 ];
 
 app.use(cors({
-  origin(origin, callback) {
+origin(origin,callback){
 
-    if (!origin) return callback(null, true);
+if(!origin) return callback(null,true);
 
-    if (allowedOrigins.includes(origin))
-      return callback(null, true);
+if(allowedOrigins.includes(origin))
+return callback(null,true);
 
-    console.log("Blocked CORS:", origin);
-    callback(new Error("Not allowed by CORS"));
-  },
-  methods:["GET","POST","OPTIONS"],
-  allowedHeaders:["Content-Type","Authorization"],
-  credentials:true
+console.log("Blocked CORS:",origin);
+callback(new Error("Not allowed by CORS"));
+},
+methods:["GET","POST","OPTIONS"],
+allowedHeaders:["Content-Type","Authorization"],
+credentials:true
 }));
 
-app.options("*", cors());
+app.options("*",cors());
 
 app.use(express.json());
 app.use(express.urlencoded({extended:true}));
 
 /* ================= FIREBASE ================= */
 
-if (!admin.apps.length) {
-  admin.initializeApp({
-    credential: admin.credential.cert({
-      projectId: process.env.FB_PROJECT_ID,
-      clientEmail: process.env.FB_CLIENT_EMAIL,
-      privateKey:
-        process.env.FB_PRIVATE_KEY.replace(/\\n/g,"\n")
-    }),
-    databaseURL: process.env.FB_DB_URL
-  });
+if(!admin.apps.length){
+admin.initializeApp({
+credential:admin.credential.cert({
+projectId:process.env.FB_PROJECT_ID,
+clientEmail:process.env.FB_CLIENT_EMAIL,
+privateKey:
+process.env.FB_PRIVATE_KEY.replace(/\\n/g,"\n")
+}),
+databaseURL:process.env.FB_DB_URL
+});
 }
 
 const db = admin.database();
@@ -102,11 +103,10 @@ res.json({status:"OK"})
 );
 
 /* ======================================================
-   CREATE PAYMENT
+CREATE PAYMENT
 ====================================================== */
 
-app.post(
-"/create-payment",
+app.post("/create-payment",
 verifyFirebaseToken,
 async(req,res)=>{
 
@@ -125,7 +125,6 @@ const redirectUrl=
 "https://testingwithme.infinityfree.me/wallet.html";
 
 const body=new URLSearchParams({
-
 token_key:process.env.ZAPUPI_API_KEY,
 secret_key:process.env.ZAPUPI_SECRET_KEY,
 amount:amount.toString(),
@@ -177,10 +176,7 @@ payment_url:zapupi.payment_url
 
 }catch(e){
 
-console.error(
-"CREATE PAYMENT ERROR:",
-e
-);
+console.error("CREATE PAYMENT ERROR:",e);
 
 res.status(500)
 .json({error:"Create payment failed"});
@@ -188,14 +184,12 @@ res.status(500)
 });
 
 /* ======================================================
-   WEBHOOK
+WEBHOOK
 ====================================================== */
 
 app.post("/zapupi-webhook",async(req,res)=>{
 
 try{
-
-console.log("Webhook hit:",req.body);
 
 const{order_id}=req.body;
 
@@ -236,13 +230,8 @@ const{uid,amount}=order;
 
 const verifyBody=
 new URLSearchParams({
-
-token_key:
-process.env.ZAPUPI_API_KEY,
-
-secret_key:
-process.env.ZAPUPI_SECRET_KEY,
-
+token_key:process.env.ZAPUPI_API_KEY,
+secret_key:process.env.ZAPUPI_SECRET_KEY,
 order_id
 });
 
@@ -263,9 +252,8 @@ JSON.parse(await verifyRes.text());
 
 if(
 !zapupi.data ||
-String(
-zapupi.data.status
-).toLowerCase()!=="success"
+String(zapupi.data.status)
+.toLowerCase()!=="success"
 ){
 
 await orderRef.update({
@@ -275,6 +263,8 @@ locked:false
 return res.status(200)
 .send("Not paid");
 }
+
+/* CREDIT WALLET */
 
 await db.ref(
 `users/${uid}/wallet/deposited`
@@ -294,26 +284,18 @@ Date.now()
 
 });
 
-console.log(
-"Payment securely credited:",
-order_id
-);
-
 res.send("OK");
 
 }catch(err){
 
-console.error(
-"WEBHOOK ERROR:",
-err
-);
+console.error("WEBHOOK ERROR:",err);
 
 res.status(500).send("Error");
 }
 });
 
 /* ======================================================
-   ✅ FIXED JOIN MATCH
+✅ JOIN MATCH (FINAL SECURE VERSION)
 ====================================================== */
 
 app.post(
@@ -327,16 +309,10 @@ const uid=req.uid;
 const{matchId,ign}=req.body;
 
 if(!matchId||!ign)
-return res.json({
-error:"INVALID_DATA"
-});
+return res.json({error:"INVALID_DATA"});
 
-const matchRef=
-db.ref(`matches/${matchId}`);
-
-const walletRef=
-db.ref(`users/${uid}/wallet`);
-
+const matchRef=db.ref(`matches/${matchId}`);
+const walletRef=db.ref(`users/${uid}/wallet`);
 const playerRef=
 db.ref(`matches/${matchId}/players/${uid}`);
 
@@ -351,9 +327,7 @@ if(!match.players)
 match.players={};
 
 const count=
-Object.keys(
-match.players
-).length;
+Object.keys(match.players).length;
 
 if(count>=match.slots)
 return;
@@ -361,18 +335,14 @@ return;
 if(match.players[uid])
 return match;
 
-match.players[uid]={
-_locking:true
-};
+match.players[uid]={_locking:true};
 
 return match;
 
 });
 
 if(!matchTxn.committed)
-return res.json({
-error:"MATCH_FULL"
-});
+return res.json({error:"MATCH_FULL"});
 
 const matchData=
 matchTxn.snapshot.val();
@@ -380,7 +350,10 @@ matchTxn.snapshot.val();
 const entryFee=
 Number(matchData.entryFee||0);
 
-/* ✅ SAFE WALLET READ */
+const publicMatchId=
+matchData.matchId||matchId;
+
+/* WALLET */
 
 const walletSnap=
 await walletRef.once("value");
@@ -421,8 +394,6 @@ dep=0;
 win-=winningsUsed;
 }
 
-/* UPDATE WALLET */
-
 await walletRef.update({
 deposited:dep,
 winnings:win
@@ -443,20 +414,26 @@ joinedAt:Date.now()
 joinedAt:Date.now()
 },
 
-[`users/${uid}/ign-latest`]:ign
+/* UPDATE IGN */
+[`users/${uid}/ign`]:ign,
+
+/* ENTRY TRANSACTION */
+[`users/${uid}/transactions/${publicMatchId}`]:{
+transactionId:publicMatchId,
+type:"match_entry",
+amount:-entryFee,
+status:"success",
+reason:"Match Joined",
+timestamp:Date.now()
+}
 
 });
 
-res.json({
-status:"SUCCESS"
-});
+res.json({status:"SUCCESS"});
 
 }catch(err){
 
-console.error(
-"JOIN ERROR:",
-err
-);
+console.error("JOIN ERROR:",err);
 
 res.status(500).json({
 error:"SERVER_ERROR"
@@ -468,7 +445,5 @@ error:"SERVER_ERROR"
 
 app.listen(
 process.env.PORT||3000,
-()=>console.log(
-"Server running securely"
-)
+()=>console.log("Server running securely")
 );
