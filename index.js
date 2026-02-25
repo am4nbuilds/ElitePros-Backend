@@ -22,7 +22,7 @@ for (const key of REQUIRED_ENV) {
   }
 }
 
-/* ================= ✅ NEW SECURE CORS ================= */
+/* ================= CORS ================= */
 
 const allowedOrigins = [
   "https://testingwithme.infinityfree.me",
@@ -30,39 +30,35 @@ const allowedOrigins = [
 ];
 
 app.use(cors({
-  origin: function (origin, callback) {
+  origin(origin, callback) {
 
-    // allow webhook + server requests
     if (!origin) return callback(null, true);
 
-    if (allowedOrigins.includes(origin)) {
+    if (allowedOrigins.includes(origin))
       return callback(null, true);
-    }
 
     console.log("Blocked CORS:", origin);
-    return callback(new Error("Not allowed by CORS"));
+    callback(new Error("Not allowed by CORS"));
   },
-  methods: ["GET","POST","OPTIONS"],
-  allowedHeaders: [
-    "Content-Type",
-    "Authorization"
-  ],
-  credentials: true
+  methods:["GET","POST","OPTIONS"],
+  allowedHeaders:["Content-Type","Authorization"],
+  credentials:true
 }));
 
-// VERY IMPORTANT FOR BROWSER PREFLIGHT
 app.options("*", cors());
 
 app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.use(express.urlencoded({extended:true}));
 
 /* ================= FIREBASE ================= */
+
 if (!admin.apps.length) {
   admin.initializeApp({
     credential: admin.credential.cert({
       projectId: process.env.FB_PROJECT_ID,
       clientEmail: process.env.FB_CLIENT_EMAIL,
-      privateKey: process.env.FB_PRIVATE_KEY.replace(/\\n/g,"\n")
+      privateKey:
+        process.env.FB_PRIVATE_KEY.replace(/\\n/g,"\n")
     }),
     databaseURL: process.env.FB_DB_URL
   });
@@ -71,34 +67,44 @@ if (!admin.apps.length) {
 const db = admin.database();
 
 /* ================= AUTH ================= */
+
 async function verifyFirebaseToken(req,res,next){
-  try{
-    const token =
-      req.headers.authorization?.split("Bearer ")[1];
 
-    if(!token)
-      return res.status(401).json({error:"Unauthorized"});
+try{
 
-    const decoded =
-      await admin.auth().verifyIdToken(token);
+const token =
+req.headers.authorization?.split("Bearer ")[1];
 
-    req.uid = decoded.uid;
+if(!token)
+return res.status(401).json({
+error:"Unauthorized"
+});
 
-    next();
+const decoded =
+await admin.auth().verifyIdToken(token);
 
-  }catch{
-    return res.status(401).json({error:"Invalid token"});
-  }
+req.uid = decoded.uid;
+
+next();
+
+}catch{
+
+return res.status(401).json({
+error:"Invalid token"
+});
+}
 }
 
 /* ================= ROOT ================= */
+
 app.get("/",(_,res)=>
-  res.json({status:"OK"})
+res.json({status:"OK"})
 );
 
 /* ======================================================
    CREATE PAYMENT
 ====================================================== */
+
 app.post(
 "/create-payment",
 verifyFirebaseToken,
@@ -119,6 +125,7 @@ const redirectUrl=
 "https://testingwithme.infinityfree.me/wallet.html";
 
 const body=new URLSearchParams({
+
 token_key:process.env.ZAPUPI_API_KEY,
 secret_key:process.env.ZAPUPI_SECRET_KEY,
 amount:amount.toString(),
@@ -183,6 +190,7 @@ res.status(500)
 /* ======================================================
    WEBHOOK
 ====================================================== */
+
 app.post("/zapupi-webhook",async(req,res)=>{
 
 try{
@@ -192,8 +200,7 @@ console.log("Webhook hit:",req.body);
 const{order_id}=req.body;
 
 if(!order_id)
-return res
-.status(400)
+return res.status(400)
 .send("Invalid webhook");
 
 const orderRef=
@@ -212,20 +219,17 @@ return;
 order.locked=true;
 
 return order;
-
 });
 
 if(!lockResult.committed)
-return res
-.status(200)
+return res.status(200)
 .send("Already processing");
 
 const order=
 lockResult.snapshot.val();
 
 if(!order)
-return res
-.status(404)
+return res.status(404)
 .send("Order not found");
 
 const{uid,amount}=order;
@@ -257,13 +261,8 @@ body:verifyBody.toString()
 const zapupi=
 JSON.parse(await verifyRes.text());
 
-console.log(
-"Gateway verify response:",
-zapupi
-);
-
 if(
-!zapupi.data||
+!zapupi.data ||
 String(
 zapupi.data.status
 ).toLowerCase()!=="success"
@@ -273,8 +272,7 @@ await orderRef.update({
 locked:false
 });
 
-return res
-.status(200)
+return res.status(200)
 .send("Not paid");
 }
 
@@ -289,8 +287,7 @@ await db.ref().update({
 [`orders/${order_id}/status`]:"success",
 [`orders/${order_id}/locked`]:false,
 
-[`users/${uid}/transactions/${order_id}/status`]:
-"success",
+[`users/${uid}/transactions/${order_id}/status`]:"success",
 
 [`users/${uid}/transactions/${order_id}/confirmedAt`]:
 Date.now()
@@ -302,7 +299,7 @@ console.log(
 order_id
 );
 
-return res.status(200).send("OK");
+res.send("OK");
 
 }catch(err){
 
@@ -311,15 +308,14 @@ console.error(
 err
 );
 
-return res
-.status(500)
-.send("Error");
+res.status(500).send("Error");
 }
 });
 
 /* ======================================================
-   JOIN MATCH
+   ✅ FIXED JOIN MATCH
 ====================================================== */
+
 app.post(
 "/join-match",
 verifyFirebaseToken,
@@ -331,9 +327,9 @@ const uid=req.uid;
 const{matchId,ign}=req.body;
 
 if(!matchId||!ign)
-return res
-.status(400)
-.json({error:"INVALID_DATA"});
+return res.json({
+error:"INVALID_DATA"
+});
 
 const matchRef=
 db.ref(`matches/${matchId}`);
@@ -342,11 +338,10 @@ const walletRef=
 db.ref(`users/${uid}/wallet`);
 
 const playerRef=
-db.ref(
-`matches/${matchId}/players/${uid}`
-);
+db.ref(`matches/${matchId}/players/${uid}`);
 
 /* SLOT LOCK */
+
 const matchTxn=
 await matchRef.transaction(match=>{
 
@@ -383,19 +378,15 @@ const matchData=
 matchTxn.snapshot.val();
 
 const entryFee=
-Number(
-matchData.entryFee||0
-);
+Number(matchData.entryFee||0);
 
-/* WALLET */
-const walletTxn=
-await walletRef.transaction(wallet=>{
+/* ✅ SAFE WALLET READ */
 
-if(!wallet)
-wallet={
-deposited:0,
-winnings:0
-};
+const walletSnap=
+await walletRef.once("value");
+
+const wallet=
+walletSnap.val()||{};
 
 let dep=
 Number(wallet.deposited||0);
@@ -403,8 +394,14 @@ Number(wallet.deposited||0);
 let win=
 Number(wallet.winnings||0);
 
-if(dep+win<entryFee)
-return;
+if(dep+win<entryFee){
+
+await playerRef.remove();
+
+return res.json({
+error:"INSUFFICIENT_BALANCE"
+});
+}
 
 let depositUsed=0;
 let winningsUsed=0;
@@ -424,33 +421,14 @@ dep=0;
 win-=winningsUsed;
 }
 
-wallet.deposited=dep;
-wallet.winnings=win;
+/* UPDATE WALLET */
 
-wallet._meta={
-depositUsed,
-winningsUsed
-};
-
-return wallet;
-
+await walletRef.update({
+deposited:dep,
+winnings:win
 });
 
-if(!walletTxn.committed){
-
-await playerRef.remove();
-
-return res.json({
-error:"INSUFFICIENT_BALANCE"
-});
-}
-
-const{
-depositUsed,
-winningsUsed
-}=
-walletTxn.snapshot
-.val()._meta||{};
+/* FINAL SAVE */
 
 await db.ref().update({
 
@@ -480,14 +458,14 @@ console.error(
 err
 );
 
-res.status(500)
-.json({
+res.status(500).json({
 error:"SERVER_ERROR"
 });
 }
 });
 
 /* ================= START ================= */
+
 app.listen(
 process.env.PORT||3000,
 ()=>console.log(
