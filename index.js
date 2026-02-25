@@ -420,7 +420,7 @@ joinedAt:Date.now()
 /* ENTRY TRANSACTION */
 [`users/${uid}/transactions/${publicMatchId}`]:{
 transactionId:publicMatchId,
-type:"match_entry",
+type:"entry",
 amount:-entryFee,
 status:"success",
 reason:"Match Joined",
