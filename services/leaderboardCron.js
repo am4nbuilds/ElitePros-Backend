@@ -1,6 +1,8 @@
 import admin from "firebase-admin";
 
-const db = admin.database();
+function getDB() {
+  return admin.database();
+}
 
 /* ================= TIME HELPERS ================= */
 
