@@ -4,6 +4,7 @@ import admin from "firebase-admin";
 import fetch from "node-fetch";
 import { runCronJobs } from "./services/leaderboardCron.js";
 
+const app = express();
 /* ================= ENV ================= */
 
 const REQUIRED_ENV = [
