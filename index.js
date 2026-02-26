@@ -786,30 +786,66 @@ app.get("/api/home", verifyFirebaseToken, async (req, res) => {
 });
 
 /* ======================================================
-USER - GET LEADERBOARD
+USER - GET LEADERBOARD (UPDATED)
 ====================================================== */
 
 app.get("/api/leaderboard", async (req, res) => {
-
   try {
 
     const filter = req.query.filter || "today";
 
-    const snap = await db.ref("leaderboard").child(filter).once("value");
+    if (!["today", "weekly", "monthly", "allTime"].includes(filter)) {
+      return res.status(400).json({ error: "INVALID_FILTER" });
+    }
 
-    if (!snap.exists()) {
+    const leaderboardRef = db.ref(`leaderboards/${filter}`);
+
+    const playersSnap = await leaderboardRef
+      .child("players")
+      .orderByChild("earnings")
+      .limitToLast(10)
+      .once("value");
+
+    if (!playersSnap.exists()) {
       return res.json({ players: [] });
     }
 
-    const players = Object.values(snap.val())
-      .sort((a, b) => (b.winnings || 0) - (a.winnings || 0));
+    const rewardsSnap = await leaderboardRef
+      .child("rewards")
+      .once("value");
 
-    res.json({ players });
+    const rewards = rewardsSnap.val() || {};
+
+    const players = [];
+
+    playersSnap.forEach(child => {
+      players.push({
+        id: child.key,
+        ...child.val()
+      });
+    });
+
+    // highest first
+    players.sort((a, b) => (b.earnings || 0) - (a.earnings || 0));
+
+    // attach reward based on rank
+    const formatted = players.map((player, index) => {
+      const rank = index + 1;
+      return {
+        id: player.id,
+        name: player.username || "Player",
+        earnings: player.earnings || 0,
+        rank,
+        reward: Number(rewards[rank] || 0)
+      };
+    });
+
+    res.json({ players: formatted });
 
   } catch (err) {
+    console.error("LEADERBOARD ERROR:", err);
     res.status(500).json({ error: "SERVER_ERROR" });
   }
-
 });
 
 /* ======================================================
