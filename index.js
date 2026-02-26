@@ -294,7 +294,7 @@ res.status(500).send("Error");
 });
 
 /* ======================================================
-JOIN MATCH (FINAL SECURE VERSION WITH ATOMIC WALLET)
+JOIN MATCH (FINAL SECURE VERSION)
 ====================================================== */
 
 app.post(
@@ -311,6 +311,7 @@ if(!matchId||!ign)
 return res.json({error:"INVALID_DATA"});
 
 const matchRef=db.ref(`matches/${matchId}`);
+const walletRef=db.ref(`users/${uid}/wallet`);
 const playerRef=
 db.ref(`matches/${matchId}/players/${uid}`);
 
@@ -351,45 +352,21 @@ Number(matchData.entryFee||0);
 const publicMatchId=
 matchData.matchId||matchId;
 
-/* ATOMIC WALLET TRANSACTION WITH DEDUCTION AMOUNTS CAPTURED */
+/* WALLET */
 
-let depositUsed = 0;
-let winningsUsed = 0;
+const walletSnap=
+await walletRef.once("value");
 
-const walletRef=db.ref(`users/${uid}/wallet`);
+const wallet=
+walletSnap.val()||{};
 
-const walletTxn = await walletRef.transaction(wallet => {
+let dep=
+Number(wallet.deposited||0);
 
-if(!wallet){
-wallet = {deposited:0, winnings:0};
-}
+let win=
+Number(wallet.winnings||0);
 
-let dep = Number(wallet.deposited||0);
-let win = Number(wallet.winnings||0);
-
-if(dep + win < entryFee){
-return; // abort transaction
-}
-
-if(dep >= entryFee){
-depositUsed = entryFee;
-winningsUsed = 0;
-dep -= entryFee;
-} else {
-depositUsed = dep;
-winningsUsed = entryFee - dep;
-dep = 0;
-win -= winningsUsed;
-}
-
-return {
-deposited: dep,
-winnings: win
-};
-
-});
-
-if(!walletTxn.committed){
+if(dep+win<entryFee){
 
 await playerRef.remove();
 
@@ -397,6 +374,29 @@ return res.json({
 error:"INSUFFICIENT_BALANCE"
 });
 }
+
+let depositUsed=0;
+let winningsUsed=0;
+
+if(dep>=entryFee){
+
+depositUsed=entryFee;
+dep-=entryFee;
+
+}else{
+
+depositUsed=dep;
+winningsUsed=
+entryFee-dep;
+
+dep=0;
+win-=winningsUsed;
+}
+
+await walletRef.update({
+deposited:dep,
+winnings:win
+});
 
 /* FINAL SAVE */
 
