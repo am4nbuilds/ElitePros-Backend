@@ -13,7 +13,8 @@ const REQUIRED_ENV = [
 "FB_PRIVATE_KEY",
 "FB_DB_URL",
 "ZAPUPI_API_KEY",
-"ZAPUPI_SECRET_KEY"
+"ZAPUPI_SECRET_KEY",
+"ADMIN_UID"
 ];
 
 for (const key of REQUIRED_ENV) {
@@ -58,8 +59,7 @@ admin.initializeApp({
 credential:admin.credential.cert({
 projectId:process.env.FB_PROJECT_ID,
 clientEmail:process.env.FB_CLIENT_EMAIL,
-privateKey:
-process.env.FB_PRIVATE_KEY.replace(/\\n/g,"\n")
+privateKey:process.env.FB_PRIVATE_KEY.replace(/\\n/g,"\n")
 }),
 databaseURL:process.env.FB_DB_URL
 });
@@ -70,29 +70,28 @@ const db = admin.database();
 /* ================= AUTH ================= */
 
 async function verifyFirebaseToken(req,res,next){
-
 try{
-
-const token =
-req.headers.authorization?.split("Bearer ")[1];
-
-if(!token)
-return res.status(401).json({
-error:"Unauthorized"
-});
-
-const decoded =
-await admin.auth().verifyIdToken(token);
-
+const token = req.headers.authorization?.split("Bearer ")[1];
+if(!token) return res.status(401).json({error:"Unauthorized"});
+const decoded = await admin.auth().verifyIdToken(token);
 req.uid = decoded.uid;
-
 next();
-
 }catch{
+return res.status(401).json({error:"Invalid token"});
+}
+}
 
-return res.status(401).json({
-error:"Invalid token"
-});
+async function verifyAdmin(req,res,next){
+try{
+const token = req.headers.authorization?.split("Bearer ")[1];
+if(!token) return res.status(401).json({error:"Unauthorized"});
+const decoded = await admin.auth().verifyIdToken(token);
+if(decoded.uid !== process.env.ADMIN_UID)
+return res.status(403).json({error:"Admin only"});
+req.uid = decoded.uid;
+next();
+}catch{
+return res.status(401).json({error:"Invalid token"});
 }
 }
 
@@ -295,7 +294,7 @@ res.status(500).send("Error");
 });
 
 /* ======================================================
-✅ JOIN MATCH (FINAL SECURE VERSION)
+JOIN MATCH (FINAL SECURE VERSION WITH ATOMIC WALLET)
 ====================================================== */
 
 app.post(
@@ -312,7 +311,6 @@ if(!matchId||!ign)
 return res.json({error:"INVALID_DATA"});
 
 const matchRef=db.ref(`matches/${matchId}`);
-const walletRef=db.ref(`users/${uid}/wallet`);
 const playerRef=
 db.ref(`matches/${matchId}/players/${uid}`);
 
@@ -353,21 +351,45 @@ Number(matchData.entryFee||0);
 const publicMatchId=
 matchData.matchId||matchId;
 
-/* WALLET */
+/* ATOMIC WALLET TRANSACTION WITH DEDUCTION AMOUNTS CAPTURED */
 
-const walletSnap=
-await walletRef.once("value");
+let depositUsed = 0;
+let winningsUsed = 0;
 
-const wallet=
-walletSnap.val()||{};
+const walletRef=db.ref(`users/${uid}/wallet`);
 
-let dep=
-Number(wallet.deposited||0);
+const walletTxn = await walletRef.transaction(wallet => {
 
-let win=
-Number(wallet.winnings||0);
+if(!wallet){
+wallet = {deposited:0, winnings:0};
+}
 
-if(dep+win<entryFee){
+let dep = Number(wallet.deposited||0);
+let win = Number(wallet.winnings||0);
+
+if(dep + win < entryFee){
+return; // abort transaction
+}
+
+if(dep >= entryFee){
+depositUsed = entryFee;
+winningsUsed = 0;
+dep -= entryFee;
+} else {
+depositUsed = dep;
+winningsUsed = entryFee - dep;
+dep = 0;
+win -= winningsUsed;
+}
+
+return {
+deposited: dep,
+winnings: win
+};
+
+});
+
+if(!walletTxn.committed){
 
 await playerRef.remove();
 
@@ -375,29 +397,6 @@ return res.json({
 error:"INSUFFICIENT_BALANCE"
 });
 }
-
-let depositUsed=0;
-let winningsUsed=0;
-
-if(dep>=entryFee){
-
-depositUsed=entryFee;
-dep-=entryFee;
-
-}else{
-
-depositUsed=dep;
-winningsUsed=
-entryFee-dep;
-
-dep=0;
-win-=winningsUsed;
-}
-
-await walletRef.update({
-deposited:dep,
-winnings:win
-});
 
 /* FINAL SAVE */
 
@@ -418,8 +417,8 @@ joinedAt:Date.now()
 [`users/${uid}/ign`]:ign,
 
 /* ENTRY TRANSACTION */
-[`users/${uid}/transactions/${publicMatchId}`]:{
-transactionId:publicMatchId,
+[`users/${uid}/transactions/${publicMatchId}_Join`]:{
+transactionId:`${publicMatchId}_Join`,
 type:"entry",
 amount:-entryFee,
 status:"success",
@@ -439,6 +438,265 @@ res.status(500).json({
 error:"SERVER_ERROR"
 });
 }
+});
+
+/* ======================================================
+ADMIN CREATE MATCH
+====================================================== */
+
+app.post("/admin/create-match",verifyAdmin,async(req,res)=>{
+try{
+const data=req.body;
+
+const duplicate=
+await db.ref("matches")
+.orderByChild("matchId")
+.equalTo(data.matchId)
+.once("value");
+
+if(duplicate.exists())
+return res.status(400).json({error:"MatchId exists"});
+
+const ref=db.ref("matches").push();
+
+await ref.set({
+matchId:data.matchId,
+name:data.name,
+banner:data.banner||"",
+entryFee:Number(data.entryFee)||0,
+slots:Number(data.slots)||0,
+perKill:Number(data.perKill)||0,
+prizePool:Number(data.prizePool)||0,
+prizeDistribution:data.prizeDistribution||{},
+map:data.map||"",
+type:data.type||"",
+gameMode:data.gameMode||"",
+rules:data.rules||"",
+matchSettings:data.matchSettings||{},
+matchTimings:data.matchTimings||{},
+status:"upcoming",
+players:{},
+results:null,
+locked:false,
+resultsCredited:false,
+cancelledProcessed:false,
+createdAt:Date.now()
+});
+
+res.json({status:"SUCCESS",matchKey:ref.key});
+}catch(e){
+res.status(500).json({error:"SERVER_ERROR"});
+}
+});
+
+/* ======================================================
+ADMIN UPDATE MATCH
+====================================================== */
+
+app.post("/admin/update-match",verifyAdmin,async(req,res)=>{
+const {matchKey,updates}=req.body;
+await db.ref(`matches/${matchKey}`).update(updates);
+res.json({status:"UPDATED"});
+});
+
+/* ======================================================
+ADMIN DUPLICATE MATCH
+====================================================== */
+
+app.post("/admin/duplicate-match",verifyAdmin,async(req,res)=>{
+const {matchKey,newMatchId}=req.body;
+
+const snap=await db.ref(`matches/${matchKey}`).once("value");
+if(!snap.exists()) return res.json({error:"NOT_FOUND"});
+
+const match=snap.val();
+delete match.players;
+delete match.results;
+
+match.matchId=newMatchId;
+match.status="upcoming";
+match.locked=false;
+match.resultsCredited=false;
+match.cancelledProcessed=false;
+
+const newRef=db.ref("matches").push();
+await newRef.set(match);
+
+res.json({status:"DUPLICATED",matchKey:newRef.key});
+});
+
+/* ======================================================
+ADMIN SET ROOM
+====================================================== */
+
+app.post("/admin/set-room",verifyAdmin,async(req,res)=>{
+const {matchKey,roomId,roomPassword}=req.body;
+await db.ref(`matches/${matchKey}`).update({
+roomId,
+roomPassword
+});
+res.json({status:"ROOM_UPDATED"});
+});
+
+/* ======================================================
+ADMIN UPDATE STATUS
+====================================================== */
+
+app.post("/admin/update-status",verifyAdmin,async(req,res)=>{
+const {matchKey,newStatus}=req.body;
+
+await db.ref(`matches/${matchKey}/status`).set(newStatus);
+
+if(newStatus==="cancelled"){
+await cancelMatch(matchKey);
+}
+
+res.json({status:"UPDATED"});
+});
+
+/* ======================================================
+CANCEL MATCH (REFUND) - ATOMIC & IDEMPOTENT
+====================================================== */
+
+async function cancelMatch(matchKey){
+
+const matchRef = db.ref(`matches/${matchKey}`);
+
+const lockTxn = await matchRef.transaction(match => {
+if(!match) return match;
+if(match.cancelledProcessed) return match;
+match.cancelledProcessed = true;
+return match;
+});
+
+if(!lockTxn.committed || !lockTxn.snapshot.val()) return;
+
+const match = lockTxn.snapshot.val();
+const players = match.players||{};
+const publicMatchId = match.matchId;
+
+for(const uid in players){
+
+const p = players[uid];
+
+await db.ref(`users/${uid}/wallet/deposited`)
+.transaction(v=>(Number(v)||0)+(Number(p.depositUsed)||0));
+
+await db.ref(`users/${uid}/wallet/winnings`)
+.transaction(v=>(Number(v)||0)+(Number(p.winningsUsed)||0));
+
+const txnId=`${publicMatchId}_Refund`;
+
+await db.ref(`users/${uid}/transactions/${txnId}`)
+.set({
+transactionId:txnId,
+matchId:publicMatchId,
+type:"Refund",
+reason:"Match Cancelled",
+amount:(Number(p.depositUsed)||0)+(Number(p.winningsUsed)||0),
+status:"Success",
+timestamp:Date.now()
+});
+}
+}
+
+/* ======================================================
+ADMIN SUBMIT RESULTS - ATOMIC CREDIT CHECK
+====================================================== */
+
+app.post("/admin/submit-results",verifyAdmin,async(req,res)=>{
+
+const {matchKey,results}=req.body;
+
+const matchRef = db.ref(`matches/${matchKey}`);
+
+const creditTxn = await matchRef.transaction(match => {
+if(!match) return match;
+if(match.resultsCredited) return; // abort - already credited
+match.resultsCredited = true;
+return match;
+});
+
+if(!creditTxn.committed) return res.json({error:"TRANSACTION_FAILED"});
+
+const match = creditTxn.snapshot.val();
+if(!match) return res.json({error:"NOT_FOUND"});
+
+const players = match.players||{};
+const publicMatchId = match.matchId;
+
+for(const uid in results){
+
+const {rank,kills}=results[uid];
+
+const rankPrize=
+Number(match.prizeDistribution?.[rank]||0);
+
+const killPrize=
+Number(match.perKill||0)*Number(kills||0);
+
+const total=rankPrize+killPrize;
+
+await db.ref(`users/${uid}/wallet/winnings`)
+.transaction(v=>(Number(v)||0)+total);
+
+const txnId=`${publicMatchId}_Winnings`;
+
+await db.ref(`users/${uid}/transactions/${txnId}`)
+.set({
+transactionId:txnId,
+matchId:publicMatchId,
+type:"Match Winnings",
+reason:"Match Winnings",
+amount:total,
+rank,
+kills,
+rankPrize,
+killPrize,
+status:"Success",
+timestamp:Date.now()
+});
+}
+
+await matchRef.update({
+results
+});
+
+res.json({status:"RESULTS_SUBMITTED"});
+});
+
+/* ======================================================
+ADMIN UPDATE RESULTS NO CREDIT
+====================================================== */
+
+app.post("/admin/update-results-only",verifyAdmin,async(req,res)=>{
+const {matchKey,results}=req.body;
+await db.ref(`matches/${matchKey}`)
+.update({
+results,
+status:"completed"
+});
+res.json({status:"UPDATED_ONLY"});
+});
+
+/* ======================================================
+ADMIN DELETE RESULTS
+====================================================== */
+
+app.post("/admin/delete-results",verifyAdmin,async(req,res)=>{
+const {matchKey}=req.body;
+
+const snap=
+await db.ref(`matches/${matchKey}/resultsCredited`)
+.once("value");
+
+if(snap.val())
+return res.json({error:"Cannot delete credited results"});
+
+await db.ref(`matches/${matchKey}/results`)
+.remove();
+
+res.json({status:"DELETED"});
 });
 
 /* ================= START ================= */
