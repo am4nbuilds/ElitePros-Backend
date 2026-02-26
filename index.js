@@ -3,10 +3,6 @@ import cors from "cors";
 import admin from "firebase-admin";
 import fetch from "node-fetch";
 import { runCronJobs } from "./services/leaderboardCron.js";
-import NodeCache from "node-cache";
-
-const homeCache = new NodeCache({ stdTTL: 60 }); // cache for 60 sec
-const app = express();
 
 /* ================= ENV ================= */
 
@@ -703,47 +699,41 @@ res.json({status:"DELETED"});
 });
 
 /* ======================================================
-USER - GET HOME (SMART CACHE)
+USER - GET HOME (NO CACHE - STABLE)
 ====================================================== */
 
 app.get("/api/home", verifyFirebaseToken, async (req, res) => {
-
   try {
 
     const uid = req.uid;
 
-    /* 1️⃣ CHECK PUBLIC CACHE */
-    let publicData = homeCache.get("home_public");
+    const [
+      userSnap,
+      bannerSnap,
+      gameModeSnap,
+      announcementSnap
+    ] = await Promise.all([
+      db.ref(`users/${uid}`).once("value"),
+      db.ref("banners").once("value"),
+      db.ref("gameModes").once("value"),
+      db.ref("announcement").once("value")
+    ]);
 
-    if (!publicData) {
-
-      const [bannerSnap, gameModeSnap, announcementSnap] = await Promise.all([
-        db.ref("banners").once("value"),
-        db.ref("gameModes").once("value"),
-        db.ref("announcement").once("value")
-      ]);
-
-      publicData = {
-        banners: bannerSnap.val() || [],
-        gameModes: gameModeSnap.val() || [],
-        announcement: announcementSnap.val() || ""
-      };
-
-      homeCache.set("home_public", publicData);
-    }
-
-    /* 2️⃣ ALWAYS FETCH USER DATA (NO CACHE) */
-    const userSnap = await db.ref(`users/${uid}`).once("value");
     const user = userSnap.val() || {};
-
     const wallet = user.wallet || {};
+
     const total =
       (Number(wallet.deposited) || 0) +
       (Number(wallet.winnings) || 0);
 
-    /* 3️⃣ MERGE RESPONSE */
+    // Prevent browser caching of private data
+    res.set("Cache-Control", "no-store");
+
     res.json({
-      ...publicData,
+      banners: bannerSnap.val() || [],
+      gameModes: gameModeSnap.val() || [],
+      announcement: announcementSnap.val() || "",
+
       user: {
         username: user.username || "Player",
         wallet: {
@@ -759,7 +749,6 @@ app.get("/api/home", verifyFirebaseToken, async (req, res) => {
     console.error("HOME ERROR:", err);
     res.status(500).json({ error: "SERVER_ERROR" });
   }
-
 });
 
 /* ======================================================
