@@ -3,7 +3,9 @@ import cors from "cors";
 import admin from "firebase-admin";
 import fetch from "node-fetch";
 import { runCronJobs } from "./services/leaderboardCron.js";
+import NodeCache from "node-cache";
 
+const homeCache = new NodeCache({ stdTTL: 60 }); // cache for 60 sec
 const app = express();
 
 /* ================= ENV ================= */
