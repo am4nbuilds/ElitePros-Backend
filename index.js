@@ -700,7 +700,7 @@ res.json({status:"DELETED"});
 });
 
 /* ======================================================
-USER - GET HOME (NO CACHE - STABLE)
+USER HOME - GET DASHBOARD DATA
 ====================================================== */
 
 app.get("/api/home", verifyFirebaseToken, async (req, res) => {
@@ -708,46 +708,78 @@ app.get("/api/home", verifyFirebaseToken, async (req, res) => {
 
     const uid = req.uid;
 
-    const [
-      userSnap,
-      bannerSnap,
-      gameModeSnap,
-      announcementSnap
-    ] = await Promise.all([
-      db.ref(`users/${uid}`).once("value"),
-      db.ref("banners").once("value"),
-      db.ref("gameModes").once("value"),
-      db.ref("announcement").once("value")
-    ]);
+    const userSnap = await db.ref(`users/${uid}`).once("value");
+    const user = userSnap.val();
 
-    const user = userSnap.val() || {};
-    const wallet = user.wallet || {};
+    if (!user) {
+      return res.status(404).json({ error: "USER_NOT_FOUND" });
+    }
 
-    const total =
-      (Number(wallet.deposited) || 0) +
-      (Number(wallet.winnings) || 0);
+    if (user.status === "banned") {
+      return res.json({ banned: true, reason: user.banReason || "Account suspended" });
+    }
 
-    // Prevent browser caching of private data
-    res.set("Cache-Control", "no-store");
+    const wallet = user.wallet || { deposited: 0, winnings: 0 };
+
+    const totalBalance =
+      Number(wallet.deposited || 0) +
+      Number(wallet.winnings || 0);
+
+    /* ANNOUNCEMENT */
+    const announcementSnap = await db
+      .ref("announcements")
+      .orderByChild("timestamp")
+      .limitToLast(1)
+      .once("value");
+
+    let announcement = "Welcome to ElitePros!";
+
+    if (announcementSnap.exists()) {
+      const val = Object.values(announcementSnap.val())[0];
+      if (val.active !== false) {
+        announcement = val.message || val.title || announcement;
+      }
+    }
+
+    /* BANNERS */
+    const bannerSnap = await db.ref("banners").once("value");
+
+    let banners = [];
+
+    if (bannerSnap.exists()) {
+      banners = Object.values(bannerSnap.val())
+        .filter(b => b.active !== false)
+        .sort((a, b) => (a.order || 999) - (b.order || 999));
+    }
+
+    /* GAME MODES */
+    const gameModesSnap = await db.ref("gameModes").once("value");
+
+    let gameModes = [];
+
+    if (gameModesSnap.exists()) {
+      gameModes = Object.values(gameModesSnap.val())
+        .filter(m => m.active !== false)
+        .sort((a, b) => (a.order || 999) - (b.order || 999));
+    }
 
     res.json({
-      banners: bannerSnap.val() || [],
-      gameModes: gameModeSnap.val() || [],
-      announcement: announcementSnap.val() || "",
-
+      banned: false,
       user: {
-        username: user.username || "Player",
-        wallet: {
-          deposited: wallet.deposited || 0,
-          winnings: wallet.winnings || 0,
-          total
-        },
-        banned: user.banned || false
-      }
+        username: user.username || user.email?.split("@")[0] || "Player"
+      },
+      wallet: {
+        deposited: Number(wallet.deposited || 0),
+        winnings: Number(wallet.winnings || 0),
+        total: totalBalance
+      },
+      announcement,
+      banners,
+      gameModes
     });
 
   } catch (err) {
-    console.error("HOME ERROR:", err);
+    console.error("HOME API ERROR:", err);
     res.status(500).json({ error: "SERVER_ERROR" });
   }
 });
