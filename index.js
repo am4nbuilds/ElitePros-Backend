@@ -1159,6 +1159,62 @@ app.get("/api/deposit-options", verifyFirebaseToken, async (req, res) => {
   }
 });
 
+/* ======================================================
+USER - GET WALLET TRANSACTIONS (PAGINATED)
+====================================================== */
+
+app.get("/api/wallet/transactions", verifyFirebaseToken, async (req, res) => {
+  try {
+    const uid = req.uid;
+
+    const limit = parseInt(req.query.limit) || 10;
+    const lastTimestamp = req.query.lastTimestamp
+      ? Number(req.query.lastTimestamp)
+      : null;
+
+    let query = db
+      .ref(`transactions/${uid}`)
+      .orderByChild("timestamp");
+
+    if (lastTimestamp) {
+      query = query.endBefore(lastTimestamp);
+    }
+
+    const snap = await query.limitToLast(limit).once("value");
+
+    if (!snap.exists()) {
+      return res.json({
+        transactions: [],
+        hasMore: false
+      });
+    }
+
+    const data = snap.val();
+
+    const transactions = Object.keys(data)
+      .map(key => ({
+        id: key,
+        ...data[key]
+      }))
+      .sort((a, b) => b.timestamp - a.timestamp);
+
+    const hasMore = transactions.length === limit;
+
+    res.json({
+      transactions,
+      hasMore,
+      nextCursor:
+        transactions.length > 0
+          ? transactions[transactions.length - 1].timestamp
+          : null
+    });
+
+  } catch (err) {
+    console.error("TRANSACTIONS API ERROR:", err);
+    res.status(500).json({ error: "SERVER_ERROR" });
+  }
+});
+
 /* ================= CRON LOOP ================= */
 
 console.log("Cron system initialized inside main backend");
