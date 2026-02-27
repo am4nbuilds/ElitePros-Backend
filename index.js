@@ -886,6 +886,61 @@ app.get("/api/account", verifyFirebaseToken, async (req, res) => {
 
 });
 
+/* ======================================================
+USER PROFILE - GET PROFILE
+====================================================== */
+
+app.get("/api/profile", verifyFirebaseToken, async (req, res) => {
+  try {
+
+    const uid = req.uid;
+
+    const userSnap = await db.ref(`users/${uid}`).once("value");
+
+    if (!userSnap.exists()) {
+      return res.status(404).json({ error: "USER_NOT_FOUND" });
+    }
+
+    const user = userSnap.val();
+
+    res.json({
+      name: user.name || "",
+      username: user.username || "",
+      email: user.email || "",
+      phone: user.phone || "",
+      bio: user.bio || ""
+    });
+
+  } catch (err) {
+    console.error("PROFILE GET ERROR:", err);
+    res.status(500).json({ error: "SERVER_ERROR" });
+  }
+});
+
+/* ======================================================
+USER PROFILE - UPDATE BIO
+====================================================== */
+
+app.post("/api/profile/update-bio", verifyFirebaseToken, async (req, res) => {
+  try {
+
+    const uid = req.uid;
+    const bio = (req.body.bio || "").trim();
+
+    if (bio.length > 30) {
+      return res.status(400).json({ error: "BIO_TOO_LONG" });
+    }
+
+    await db.ref(`users/${uid}/bio`).set(bio);
+
+    res.json({ status: "SUCCESS" });
+
+  } catch (err) {
+    console.error("PROFILE UPDATE ERROR:", err);
+    res.status(500).json({ error: "SERVER_ERROR" });
+  }
+});
+
 /* ================= START ================= */
 
 app.listen(
