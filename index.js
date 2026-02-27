@@ -948,6 +948,136 @@ process.env.PORT||3000,
 ()=>console.log("Server running securely")
 );
 
+/* ======================================================
+AUTH - RESOLVE IDENTIFIER (USERNAME / PHONE / EMAIL)
+====================================================== */
+
+app.post("/api/auth/resolve-identifier", async (req, res) => {
+  try {
+    const { identifier } = req.body;
+
+    if (!identifier)
+      return res.status(400).json({ error: "IDENTIFIER_REQUIRED" });
+
+    const value = identifier.trim();
+
+    // If email format → return directly
+    if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) {
+      return res.json({ email: value });
+    }
+
+    const usersRef = db.ref("users");
+    let snapshot;
+
+    // Phone format (India 10-digit)
+    if (/^[6-9]\d{9}$/.test(value)) {
+      snapshot = await usersRef
+        .orderByChild("phone")
+        .equalTo(value)
+        .limitToFirst(1)
+        .once("value");
+    } else {
+      // Username
+      snapshot = await usersRef
+        .orderByChild("username")
+        .equalTo(value)
+        .limitToFirst(1)
+        .once("value");
+    }
+
+    if (!snapshot.exists()) {
+      return res.status(404).json({ error: "USER_NOT_FOUND" });
+    }
+
+    const userData = Object.values(snapshot.val())[0];
+
+    res.json({ email: userData.email });
+
+  } catch (err) {
+    console.error("RESOLVE IDENTIFIER ERROR:", err);
+    res.status(500).json({ error: "SERVER_ERROR" });
+  }
+});
+
+/* ======================================================
+AUTH - CREATE SESSION (VERIFY TOKEN & BAN CHECK)
+====================================================== */
+
+app.post("/api/auth/session", verifyFirebaseToken, async (req, res) => {
+  try {
+    const uid = req.uid;
+
+    const snap = await db.ref(`users/${uid}`).once("value");
+
+    if (!snap.exists()) {
+      return res.status(404).json({ error: "USER_NOT_FOUND" });
+    }
+
+    const user = snap.val();
+
+    if (user.status === "banned") {
+      return res.json({
+        banned: true,
+        reason: user.banReason || "Account suspended"
+      });
+    }
+
+    res.json({ success: true });
+
+  } catch (err) {
+    console.error("SESSION ERROR:", err);
+    res.status(500).json({ error: "SERVER_ERROR" });
+  }
+});
+
+/* ======================================================
+AUTH - FORGOT PASSWORD (RESOLVE EMAIL)
+====================================================== */
+
+app.post("/api/auth/forgot-password", async (req, res) => {
+  try {
+    const { identifier } = req.body;
+
+    if (!identifier)
+      return res.status(400).json({ error: "IDENTIFIER_REQUIRED" });
+
+    const value = identifier.trim();
+
+    if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) {
+      return res.json({ email: value });
+    }
+
+    const usersRef = db.ref("users");
+    let snapshot;
+
+    if (/^[6-9]\d{9}$/.test(value)) {
+      snapshot = await usersRef
+        .orderByChild("phone")
+        .equalTo(value)
+        .limitToFirst(1)
+        .once("value");
+    } else {
+      snapshot = await usersRef
+        .orderByChild("username")
+        .equalTo(value)
+        .limitToFirst(1)
+        .once("value");
+    }
+
+    if (!snapshot.exists()) {
+      return res.status(404).json({ error: "USER_NOT_FOUND" });
+    }
+
+    const userData = Object.values(snapshot.val())[0];
+
+    res.json({ email: userData.email });
+
+  } catch (err) {
+    console.error("FORGOT PASSWORD ERROR:", err);
+    res.status(500).json({ error: "SERVER_ERROR" });
+  }
+});
+
 /* ================= CRON LOOP ================= */
 
 console.log("Cron system initialized inside main backend");
