@@ -1224,6 +1224,80 @@ app.get("/api/wallet/transactions", verifyFirebaseToken, async (req, res) => {
   }
 });
 
+/* ======================================================
+USER - GET MATCHES (PAGINATED)
+====================================================== */
+
+app.get("/api/matches", verifyFirebaseToken, async (req, res) => {
+  try {
+    const uid = req.uid;
+
+    const status = req.query.status || "upcoming";
+    const limit = parseInt(req.query.limit) || 10;
+    const cursor = req.query.cursor ? Number(req.query.cursor) : null;
+
+    let query = db
+      .ref("matches")
+      .orderByChild("matchTimings/scheduleTime");
+
+    if (cursor) {
+      query = query.endBefore(cursor);
+    }
+
+    const snap = await query.limitToLast(limit).once("value");
+
+    if (!snap.exists()) {
+      return res.json({
+        matches: [],
+        hasMore: false
+      });
+    }
+
+    const data = snap.val();
+
+    const matches = Object.keys(data)
+      .map(key => {
+        const match = data[key];
+
+        if (match.status !== status) return null;
+
+        const players = match.players || {};
+        const joinedCount = Object.keys(players).length;
+        const isJoined = !!players[uid];
+
+        return {
+          id: key,
+          matchId: match.matchId || key,
+          name: match.name,
+          banner: match.banner || "",
+          entryFee: Number(match.entryFee || 0),
+          prizePool: Number(match.prizePool || 0),
+          perKill: Number(match.perKill || 0),
+          slots: Number(match.slots || 0),
+          joinedCount,
+          isJoined,
+          scheduleTime: match.matchTimings?.scheduleTime || 0,
+          status: match.status
+        };
+      })
+      .filter(Boolean)
+      .sort((a, b) => b.scheduleTime - a.scheduleTime);
+
+    res.json({
+      matches,
+      hasMore: matches.length === limit,
+      nextCursor:
+        matches.length > 0
+          ? matches[matches.length - 1].scheduleTime
+          : null
+    });
+
+  } catch (err) {
+    console.error("MATCHES API ERROR:", err);
+    res.status(500).json({ error: "SERVER_ERROR" });
+  }
+});
+
 /* ================= CRON LOOP ================= */
 
 console.log("Cron system initialized inside main backend");
