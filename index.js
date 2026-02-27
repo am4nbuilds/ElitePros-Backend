@@ -1078,6 +1078,60 @@ app.post("/api/auth/forgot-password", async (req, res) => {
   }
 });
 
+/* ======================================================
+USER - GET WALLET DASHBOARD (LAST 5 TRANSACTIONS)
+====================================================== */
+
+app.get("/api/wallet", verifyFirebaseToken, async (req, res) => {
+  try {
+    const uid = req.uid;
+
+    const userSnap = await db.ref(`users/${uid}`).once("value");
+
+    if (!userSnap.exists()) {
+      return res.status(404).json({ error: "USER_NOT_FOUND" });
+    }
+
+    const user = userSnap.val();
+    const wallet = user.wallet || { deposited: 0, winnings: 0 };
+
+    const deposited = Number(wallet.deposited || 0);
+    const winnings = Number(wallet.winnings || 0);
+    const total = deposited + winnings;
+
+    // Strictly fetch only last 5 transactions
+    const transactionsSnap = await db
+      .ref(`users/${uid}/transactions`)
+      .orderByChild("timestamp")
+      .limitToLast(5)
+      .once("value");
+
+    let transactions = [];
+
+    if (transactionsSnap.exists()) {
+      transactions = Object.entries(transactionsSnap.val())
+        .map(([id, data]) => ({
+          id,
+          ...data
+        }))
+        .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+    }
+
+    res.json({
+      wallet: {
+        deposited,
+        winnings,
+        total
+      },
+      transactions
+    });
+
+  } catch (err) {
+    console.error("WALLET API ERROR:", err);
+    res.status(500).json({ error: "SERVER_ERROR" });
+  }
+});
+
 /* ================= CRON LOOP ================= */
 
 console.log("Cron system initialized inside main backend");
