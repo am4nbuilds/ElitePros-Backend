@@ -1132,6 +1132,33 @@ app.get("/api/wallet", verifyFirebaseToken, async (req, res) => {
   }
 });
 
+/* ======================================================
+USER - GET DEPOSIT OPTIONS
+====================================================== */
+
+app.get("/api/deposit-options", verifyFirebaseToken, async (req, res) => {
+  try {
+    const snap = await db.ref("settings/depositAmounts").once("value");
+
+    if (!snap.exists()) {
+      return res.json({ amounts: [100, 250, 500, 1000] });
+    }
+
+    const raw = snap.val();
+
+    const amounts = Object.values(raw)
+      .map(v => Number(v))
+      .filter(v => Number.isFinite(v) && v > 0)
+      .sort((a, b) => a - b);
+
+    res.json({ amounts });
+
+  } catch (err) {
+    console.error("DEPOSIT OPTIONS ERROR:", err);
+    res.status(500).json({ error: "SERVER_ERROR" });
+  }
+});
+
 /* ================= CRON LOOP ================= */
 
 console.log("Cron system initialized inside main backend");
