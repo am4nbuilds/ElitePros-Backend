@@ -1161,6 +1161,7 @@ app.get("/api/deposit-options", verifyFirebaseToken, async (req, res) => {
 
 /* ======================================================
 USER - GET WALLET TRANSACTIONS (PAGINATED)
+READS FROM: users/{uid}/transactions
 ====================================================== */
 
 app.get("/api/wallet/transactions", verifyFirebaseToken, async (req, res) => {
@@ -1173,9 +1174,10 @@ app.get("/api/wallet/transactions", verifyFirebaseToken, async (req, res) => {
       : null;
 
     let query = db
-      .ref(`transactions/${uid}`)
+      .ref(`users/${uid}/transactions`)
       .orderByChild("timestamp");
 
+    // If loading next page, fetch older than lastTimestamp
     if (lastTimestamp) {
       query = query.endBefore(lastTimestamp);
     }
@@ -1185,28 +1187,35 @@ app.get("/api/wallet/transactions", verifyFirebaseToken, async (req, res) => {
     if (!snap.exists()) {
       return res.json({
         transactions: [],
-        hasMore: false
+        hasMore: false,
+        nextCursor: null
       });
     }
 
     const data = snap.val();
 
-    const transactions = Object.keys(data)
+    // Convert object to array
+    let transactions = Object.keys(data)
       .map(key => ({
         id: key,
         ...data[key]
       }))
+      // remove bad or missing timestamps
+      .filter(t => typeof t.timestamp === "number")
+      // newest first
       .sort((a, b) => b.timestamp - a.timestamp);
 
     const hasMore = transactions.length === limit;
 
+    const nextCursor =
+      transactions.length > 0
+        ? transactions[transactions.length - 1].timestamp
+        : null;
+
     res.json({
       transactions,
       hasMore,
-      nextCursor:
-        transactions.length > 0
-          ? transactions[transactions.length - 1].timestamp
-          : null
+      nextCursor
     });
 
   } catch (err) {
