@@ -1298,6 +1298,89 @@ app.get("/api/matches", verifyFirebaseToken, async (req, res) => {
   }
 });
 
+/* ======================================================
+USER - GET MATCH DETAILS (JOIN PAGE)
+====================================================== */
+
+app.get(
+"/api/match/:matchId",
+verifyFirebaseToken,
+async (req, res) => {
+
+  try {
+
+    const { matchId } = req.params;
+    const uid = req.uid;
+
+    const matchSnap = await db.ref(`matches/${matchId}`).once("value");
+
+    if (!matchSnap.exists())
+      return res.status(404).json({ error: "MATCH_NOT_FOUND" });
+
+    const match = matchSnap.val();
+
+    const players = match.players || {};
+    const joinedCount = Object.keys(players).length;
+    const isJoined = !!players[uid];
+
+    res.json({
+      id: matchId,
+      name: match.name,
+      matchId: match.matchId || matchId,
+      prizePool: match.prizePool || 0,
+      perKill: match.perKill || 0,
+      entryFee: match.entryFee || 0,
+      type: match.type || "solo",
+      platform: match.platform || "Phone",
+      map: match.map || "N/A",
+      slots: match.slots || 100,
+      joinedCount,
+      isJoined,
+      status: match.status || "upcoming",
+      banner: match.banner || null,
+      scheduleTime: match.startTime || null
+    });
+
+  } catch (err) {
+    console.error("MATCH DETAILS ERROR:", err);
+    res.status(500).json({ error: "SERVER_ERROR" });
+  }
+
+});
+
+/* ======================================================
+USER - GET WALLET SUMMARY
+====================================================== */
+
+app.get(
+"/api/wallet/summary",
+verifyFirebaseToken,
+async (req, res) => {
+
+  try {
+
+    const uid = req.uid;
+
+    const snap = await db.ref(`users/${uid}/wallet`).once("value");
+
+    const wallet = snap.val() || {};
+
+    const deposited = Number(wallet.deposited || 0);
+    const winnings = Number(wallet.winnings || 0);
+
+    res.json({
+      deposited,
+      winnings,
+      total: deposited + winnings
+    });
+
+  } catch (err) {
+    console.error("WALLET SUMMARY ERROR:", err);
+    res.status(500).json({ error: "SERVER_ERROR" });
+  }
+
+});
+
 /* ================= CRON LOOP ================= */
 
 console.log("Cron system initialized inside main backend");
