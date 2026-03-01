@@ -1225,19 +1225,23 @@ app.get("/api/wallet/transactions", verifyFirebaseToken, async (req, res) => {
 });
 
 /* ======================================================
-USER - GET MATCHES (PAGINATED)
+USER - GET MATCHES (PAGINATED BY STATUS)
 ====================================================== */
 
 app.get("/api/matches", verifyFirebaseToken, async (req, res) => {
   try {
-    const uid = req.uid;
 
+    const uid = req.uid;
     const status = req.query.status || "upcoming";
     const limit = parseInt(req.query.limit) || 10;
     const cursor = req.query.cursor ? Number(req.query.cursor) : null;
 
+    if (!["upcoming", "ongoing", "completed"].includes(status)) {
+      return res.status(400).json({ error: "INVALID_STATUS" });
+    }
+
     let query = db
-      .ref("matches")
+      .ref(`matches/${status}`)
       .orderByChild("matchTimings/scheduleTime");
 
     if (cursor) {
@@ -1253,35 +1257,30 @@ app.get("/api/matches", verifyFirebaseToken, async (req, res) => {
       });
     }
 
-    const data = snap.val();
+    const matches = [];
 
-    const matches = Object.keys(data)
-      .map(key => {
-        const match = data[key];
+    snap.forEach(child => {
 
-        if (match.status !== status) return null;
+      const match = child.val();
+      const players = match.players || {};
 
-        const players = match.players || {};
-        const joinedCount = Object.keys(players).length;
-        const isJoined = !!players[uid];
+      matches.push({
+        id: child.key,
+        matchId: match.matchId || child.key,
+        name: match.name,
+        banner: match.banner || "",
+        entryFee: Number(match.entryFee || 0),
+        prizePool: Number(match.prizePool || 0),
+        perKill: Number(match.perKill || 0),
+        slots: Number(match.slots || 0),
+        joinedCount: Object.keys(players).length,
+        isJoined: !!players[uid],
+        scheduleTime: match.matchTimings?.scheduleTime || 0
+      });
 
-        return {
-          id: key,
-          matchId: match.matchId || key,
-          name: match.name,
-          banner: match.banner || "",
-          entryFee: Number(match.entryFee || 0),
-          prizePool: Number(match.prizePool || 0),
-          perKill: Number(match.perKill || 0),
-          slots: Number(match.slots || 0),
-          joinedCount,
-          isJoined,
-          scheduleTime: match.matchTimings?.scheduleTime || 0,
-          status: match.status
-        };
-      })
-      .filter(Boolean)
-      .sort((a, b) => b.scheduleTime - a.scheduleTime);
+    });
+
+    matches.sort((a, b) => b.scheduleTime - a.scheduleTime);
 
     res.json({
       matches,
