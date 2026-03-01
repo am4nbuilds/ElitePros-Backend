@@ -294,152 +294,122 @@ res.status(500).send("Error");
 });
 
 /* ======================================================
-JOIN MATCH (FINAL SECURE VERSION)
+JOIN MATCH (UPCOMING ONLY - STRICT VERSION)
 ====================================================== */
 
-app.post(
-"/join-match",
-verifyFirebaseToken,
-async(req,res)=>{
+app.post("/join-match", verifyFirebaseToken, async (req, res) => {
+  try {
 
-try{
+    const uid = req.uid;
+    const { matchId, ign } = req.body;
 
-const uid=req.uid;
-const{matchId,ign}=req.body;
+    if (!matchId || !ign)
+      return res.json({ error: "INVALID_DATA" });
 
-if(!matchId||!ign)
-return res.json({error:"INVALID_DATA"});
+    // 🔒 ONLY LOOK INSIDE UPCOMING
+    const matchRef = db.ref(`matches/upcoming/${matchId}`);
+    const matchSnap = await matchRef.once("value");
 
-const matchRef=db.ref(`matches/${matchId}`);
-const walletRef=db.ref(`users/${uid}/wallet`);
-const playerRef=
-db.ref(`matches/${matchId}/players/${uid}`);
+    if (!matchSnap.exists())
+      return res.json({ error: "MATCH_NOT_AVAILABLE" });
 
-/* SLOT LOCK */
+    const matchData = matchSnap.val();
 
-const matchTxn=
-await matchRef.transaction(match=>{
+    const playerRef = db.ref(`matches/upcoming/${matchId}/players/${uid}`);
+    const walletRef = db.ref(`users/${uid}/wallet`);
 
-if(!match)return match;
+    /* ================= SLOT LOCK ================= */
 
-if(!match.players)
-match.players={};
+    const txn = await matchRef.transaction(match => {
 
-const count=
-Object.keys(match.players).length;
+      if (!match) return match;
 
-if(count>=match.slots)
-return;
+      if (!match.players) match.players = {};
 
-if(match.players[uid])
-return match;
+      const count = Object.keys(match.players).length;
 
-match.players[uid]={_locking:true};
+      if (count >= match.slots) return;
 
-return match;
+      if (match.players[uid]) return match;
 
+      match.players[uid] = { _locking: true };
+
+      return match;
+
+    });
+
+    if (!txn.committed)
+      return res.json({ error: "MATCH_FULL" });
+
+    const entryFee = Number(matchData.entryFee || 0);
+    const publicMatchId = matchData.matchId || matchId;
+
+    /* ================= WALLET CHECK ================= */
+
+    const walletSnap = await walletRef.once("value");
+    const wallet = walletSnap.val() || {};
+
+    let dep = Number(wallet.deposited || 0);
+    let win = Number(wallet.winnings || 0);
+
+    if (dep + win < entryFee) {
+      await playerRef.remove();
+      return res.json({ error: "INSUFFICIENT_BALANCE" });
+    }
+
+    let depositUsed = 0;
+    let winningsUsed = 0;
+
+    if (dep >= entryFee) {
+      depositUsed = entryFee;
+      dep -= entryFee;
+    } else {
+      depositUsed = dep;
+      winningsUsed = entryFee - dep;
+      dep = 0;
+      win -= winningsUsed;
+    }
+
+    await walletRef.update({
+      deposited: dep,
+      winnings: win
+    });
+
+    /* ================= FINAL SAVE ================= */
+
+    await db.ref().update({
+
+      [`matches/upcoming/${matchId}/players/${uid}`]: {
+        ign,
+        depositUsed,
+        winningsUsed,
+        joinedAt: Date.now()
+      },
+
+      [`users/${uid}/myMatches/${matchId}`]: {
+        joinedAt: Date.now()
+      },
+
+      [`users/${uid}/ign`]: ign,
+
+      [`users/${uid}/transactions/${publicMatchId}_Join`]: {
+        transactionId: `${publicMatchId}_Join`,
+        type: "entry",
+        amount: -entryFee,
+        status: "success",
+        reason: "Match Joined",
+        timestamp: Date.now()
+      }
+
+    });
+
+    res.json({ status: "SUCCESS" });
+
+  } catch (err) {
+    console.error("JOIN ERROR:", err);
+    res.status(500).json({ error: "SERVER_ERROR" });
+  }
 });
-
-if(!matchTxn.committed)
-return res.json({error:"MATCH_FULL"});
-
-const matchData=
-matchTxn.snapshot.val();
-
-const entryFee=
-Number(matchData.entryFee||0);
-
-const publicMatchId=
-matchData.matchId||matchId;
-
-/* WALLET */
-
-const walletSnap=
-await walletRef.once("value");
-
-const wallet=
-walletSnap.val()||{};
-
-let dep=
-Number(wallet.deposited||0);
-
-let win=
-Number(wallet.winnings||0);
-
-if(dep+win<entryFee){
-
-await playerRef.remove();
-
-return res.json({
-error:"INSUFFICIENT_BALANCE"
-});
-}
-
-let depositUsed=0;
-let winningsUsed=0;
-
-if(dep>=entryFee){
-
-depositUsed=entryFee;
-dep-=entryFee;
-
-}else{
-
-depositUsed=dep;
-winningsUsed=
-entryFee-dep;
-
-dep=0;
-win-=winningsUsed;
-}
-
-await walletRef.update({
-deposited:dep,
-winnings:win
-});
-
-/* FINAL SAVE */
-
-await db.ref().update({
-
-[`matches/${matchId}/players/${uid}`]:{
-ign,
-depositUsed,
-winningsUsed,
-joinedAt:Date.now()
-},
-
-[`users/${uid}/myMatches/${matchId}`]:{
-joinedAt:Date.now()
-},
-
-/* UPDATE IGN */
-[`users/${uid}/ign`]:ign,
-
-/* ENTRY TRANSACTION */
-[`users/${uid}/transactions/${publicMatchId}_Join`]:{
-transactionId:`${publicMatchId}_Join`,
-type:"entry",
-amount:-entryFee,
-status:"success",
-reason:"Match Joined",
-timestamp:Date.now()
-}
-
-});
-
-res.json({status:"SUCCESS"});
-
-}catch(err){
-
-console.error("JOIN ERROR:",err);
-
-res.status(500).json({
-error:"SERVER_ERROR"
-});
-}
-});
-
 /* ======================================================
 ADMIN CREATE MATCH
 ====================================================== */
@@ -1295,56 +1265,6 @@ app.get("/api/matches", verifyFirebaseToken, async (req, res) => {
     console.error("MATCHES API ERROR:", err);
     res.status(500).json({ error: "SERVER_ERROR" });
   }
-});
-
-/* ======================================================
-USER - GET MATCH DETAILS (JOIN PAGE)
-====================================================== */
-
-app.get(
-"/api/match/:matchId",
-verifyFirebaseToken,
-async (req, res) => {
-
-  try {
-
-    const { matchId } = req.params;
-    const uid = req.uid;
-
-    const matchSnap = await db.ref(`matches/${matchId}`).once("value");
-
-    if (!matchSnap.exists())
-      return res.status(404).json({ error: "MATCH_NOT_FOUND" });
-
-    const match = matchSnap.val();
-
-    const players = match.players || {};
-    const joinedCount = Object.keys(players).length;
-    const isJoined = !!players[uid];
-
-    res.json({
-      id: matchId,
-      name: match.name,
-      matchId: match.matchId || matchId,
-      prizePool: match.prizePool || 0,
-      perKill: match.perKill || 0,
-      entryFee: match.entryFee || 0,
-      type: match.type || "solo",
-      platform: match.platform || "Phone",
-      map: match.map || "N/A",
-      slots: match.slots || 100,
-      joinedCount,
-      isJoined,
-      status: match.status || "upcoming",
-      banner: match.banner || null,
-      scheduleTime: match.startTime || null
-    });
-
-  } catch (err) {
-    console.error("MATCH DETAILS ERROR:", err);
-    res.status(500).json({ error: "SERVER_ERROR" });
-  }
-
 });
 
 /* ======================================================
