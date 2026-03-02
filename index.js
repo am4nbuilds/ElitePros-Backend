@@ -1061,11 +1061,14 @@ app.post("/api/auth/forgot-password", async (req, res) => {
 });
 
 /* ======================================================
-USER - GET WALLET DASHBOARD (LAST 5 TRANSACTIONS)
+USER - GET WALLET (BALANCE + LAST 5 TRANSACTIONS)
+READS FROM: users/{uid}/wallet
+READS FROM: users/{uid}/transactions
 ====================================================== */
 
 app.get("/api/wallet", verifyFirebaseToken, async (req, res) => {
   try {
+
     const uid = req.uid;
 
     const userSnap = await db.ref(`users/${uid}`).once("value");
@@ -1081,7 +1084,7 @@ app.get("/api/wallet", verifyFirebaseToken, async (req, res) => {
     const winnings = Number(wallet.winnings || 0);
     const total = deposited + winnings;
 
-    // Strictly fetch only last 5 transactions
+    // Fetch last 5 transactions only
     const transactionsSnap = await db
       .ref(`users/${uid}/transactions`)
       .orderByChild("timestamp")
@@ -1096,10 +1099,12 @@ app.get("/api/wallet", verifyFirebaseToken, async (req, res) => {
           id,
           ...data
         }))
-        .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+        .filter(t => typeof t.timestamp === "number")
+        .sort((a, b) => b.timestamp - a.timestamp);
     }
 
     res.json({
+      balance: total, // ← IMPORTANT (for join page)
       wallet: {
         deposited,
         winnings,
@@ -1277,39 +1282,6 @@ app.get("/api/matches", verifyFirebaseToken, async (req, res) => {
     console.error("MATCHES API ERROR:", err);
     res.status(500).json({ error: "SERVER_ERROR" });
   }
-});
-
-/* ======================================================
-USER - GET WALLET SUMMARY
-====================================================== */
-
-app.get(
-"/api/wallet/summary",
-verifyFirebaseToken,
-async (req, res) => {
-
-  try {
-
-    const uid = req.uid;
-
-    const snap = await db.ref(`users/${uid}/wallet`).once("value");
-
-    const wallet = snap.val() || {};
-
-    const deposited = Number(wallet.deposited || 0);
-    const winnings = Number(wallet.winnings || 0);
-
-    res.json({
-      deposited,
-      winnings,
-      total: deposited + winnings
-    });
-
-  } catch (err) {
-    console.error("WALLET SUMMARY ERROR:", err);
-    res.status(500).json({ error: "SERVER_ERROR" });
-  }
-
 });
 
 /* ======================================================
