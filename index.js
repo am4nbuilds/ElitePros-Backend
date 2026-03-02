@@ -321,9 +321,6 @@ app.post(
 
       const matchData = matchSnap.val();
 
-      if (matchData.status !== "upcoming")
-        return res.json({ error: "MATCH_CLOSED" });
-
       /* SLOT LOCK TRANSACTION */
 
       const matchTxn = await matchRef.transaction(match => {
