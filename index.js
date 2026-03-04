@@ -400,25 +400,149 @@ app.post(
         [`users/${uid}/ign`]: ign,
 
         [`users/${uid}/transactions/${publicMatchId}_Join`]: {
-          transactionId: `${publicMatchId}_Join`,
-          type: "entry",
-          amount: -entryFee,
-          status: "success",
-          reason: "Match Joined",
-          timestamp: Date.now()
-        }
+/* ======================================================
+JOIN MATCH (FINAL PRODUCTION SAFE)
+====================================================== */
 
-      });
+app.post(
+"/join-match",
+verifyFirebaseToken,
+async(req,res)=>{
 
-      res.json({ status: "SUCCESS" });
+try{
 
-    } catch (err) {
-      console.error("JOIN ERROR:", err);
-      res.status(500).json({ error: "SERVER_ERROR" });
-    }
-  }
-);
+const uid=req.uid;
+const{matchId,ign}=req.body;
 
+if(!matchId||!ign)
+return res.json({error:"INVALID_DATA"});
+
+/* REFS */
+
+const matchRef=db.ref(`matches/upcoming/${matchId}`);
+const walletRef=db.ref(`users/${uid}/wallet`);
+
+/* GET MATCH */
+
+const matchSnap=await matchRef.once("value");
+
+if(!matchSnap.exists())
+return res.json({error:"MATCH_NOT_FOUND"});
+
+const matchData=matchSnap.val();
+
+const entryFee=Number(matchData.entryFee||0);
+const totalSlots=Number(matchData.totalSlots||0);
+
+/* WALLET CHECK FIRST */
+
+const walletSnap=await walletRef.once("value");
+
+const wallet=walletSnap.val()||{};
+
+let dep=Number(wallet.deposited||0);
+let win=Number(wallet.winnings||0);
+
+if(dep+win<entryFee)
+return res.json({error:"INSUFFICIENT_BALANCE"});
+
+/* SLOT LOCK (ATOMIC) */
+
+const slotTxn=await matchRef.transaction(match=>{
+
+if(!match) return match;
+
+if(!match.players)
+match.players={};
+
+if(!match.joinedCount)
+match.joinedCount=0;
+
+if(match.players[uid])
+return match;
+
+if(match.joinedCount>=match.totalSlots)
+return;
+
+/* LOCK SLOT */
+
+match.players[uid]={_locking:true};
+match.joinedCount+=1;
+
+return match;
+
+});
+
+if(!slotTxn.committed)
+return res.json({error:"MATCH_FULL"});
+
+const publicMatchId=matchData.matchId||matchId;
+
+/* WALLET DEDUCTION */
+
+let depositUsed=0;
+let winningsUsed=0;
+
+if(dep>=entryFee){
+
+depositUsed=entryFee;
+dep-=entryFee;
+
+}else{
+
+depositUsed=dep;
+winningsUsed=entryFee-dep;
+
+dep=0;
+win-=winningsUsed;
+
+}
+
+await walletRef.update({
+deposited:dep,
+winnings:win
+});
+
+/* FINAL SAVE */
+
+await db.ref().update({
+
+[`matches/upcoming/${matchId}/players/${uid}`]:{
+ign,
+depositUsed,
+winningsUsed,
+joinedAt:Date.now()
+},
+
+[`users/${uid}/myMatches/${matchId}`]:{
+joinedAt:Date.now()
+},
+
+[`users/${uid}/ign`]:ign,
+
+[`users/${uid}/transactions/${publicMatchId}_Join`]:{
+transactionId:`${publicMatchId}_Join`,
+type:"entry",
+amount:-entryFee,
+status:"success",
+reason:"Match Joined",
+timestamp:Date.now()
+}
+
+});
+
+res.json({status:"SUCCESS"});
+
+}catch(err){
+
+console.error("JOIN ERROR:",err);
+
+res.status(500).json({
+error:"SERVER_ERROR"
+});
+}
+});
+      
 /* ======================================================
 ADMIN CREATE MATCH
 ====================================================== */
