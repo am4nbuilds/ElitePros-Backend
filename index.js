@@ -387,16 +387,136 @@ depositUsed=dep;
 winningsUsed=entryFee-dep;
 
 dep=0;
+/* ======================================================
+JOIN MATCH (RACE CONDITION SAFE)
+====================================================== */
+
+app.post(
+"/join-match",
+verifyFirebaseToken,
+async(req,res)=>{
+
+try{
+
+const uid=req.uid;
+const {matchId,ign}=req.body;
+
+if(!matchId||!ign)
+return res.json({error:"INVALID_DATA"});
+
+/* REFS */
+
+const matchRef=db.ref(`matches/upcoming/${matchId}`);
+const walletRef=db.ref(`users/${uid}/wallet`);
+
+/* GET MATCH */
+
+const matchSnap=await matchRef.once("value");
+
+if(!matchSnap.exists())
+return res.json({error:"MATCH_NOT_FOUND"});
+
+const matchData=matchSnap.val();
+
+const entryFee=Number(matchData.entryFee||0);
+
+/* ======================================================
+SLOT LOCK (ATOMIC)
+====================================================== */
+
+const slotTxn=await matchRef.transaction(match=>{
+
+if(!match) return match;
+
+if(!match.players)
+match.players={};
+
+if(!match.joinedCount)
+match.joinedCount=0;
+
+if(match.players[uid])
+return match;
+
+if(match.joinedCount>=match.slots)
+return;
+
+/* LOCK SLOT */
+
+match.players[uid]={_locking:true};
+match.joinedCount+=1;
+
+return match;
+
+});
+
+if(!slotTxn.committed)
+return res.json({error:"MATCH_FULL"});
+
+/* ======================================================
+WALLET DEDUCTION (ATOMIC)
+====================================================== */
+
+let depositUsed=0;
+let winningsUsed=0;
+
+const walletTxn=await walletRef.transaction(wallet=>{
+
+wallet=wallet||{};
+
+let dep=Number(wallet.deposited||0);
+let win=Number(wallet.winnings||0);
+
+if(dep+win<entryFee)
+return; // abort
+
+if(dep>=entryFee){
+
+depositUsed=entryFee;
+dep-=entryFee;
+
+}else{
+
+depositUsed=dep;
+winningsUsed=entryFee-dep;
+
+dep=0;
 win-=winningsUsed;
 
 }
 
-await walletRef.update({
-deposited:dep,
-winnings:win
+wallet.deposited=dep;
+wallet.winnings=win;
+
+return wallet;
+
 });
 
-/* FINAL SAVE */
+if(!walletTxn.committed){
+
+/* ROLLBACK SLOT */
+
+await matchRef.transaction(match=>{
+
+if(!match) return match;
+
+if(match.players && match.players[uid]){
+delete match.players[uid];
+match.joinedCount=(match.joinedCount||1)-1;
+}
+
+return match;
+
+});
+
+return res.json({error:"INSUFFICIENT_BALANCE"});
+
+}
+
+/* ======================================================
+FINAL SAVE
+====================================================== */
+
+const publicMatchId=matchData.matchId||matchId;
 
 await db.ref().update({
 
@@ -430,9 +550,8 @@ res.json({status:"SUCCESS"});
 
 console.error("JOIN ERROR:",err);
 
-res.status(500).json({
-error:"SERVER_ERROR"
-});
+res.status(500).json({error:"SERVER_ERROR"});
+
 }
 });
       
