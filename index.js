@@ -1373,14 +1373,6 @@ app.get(
   }
 );
 
-/* ================= CRON LOOP ================= */
-
-console.log("Cron system initialized inside main backend");
-
-setInterval(async () => {
-  try {
-    await runCronJobs();
-  } catch (err) {
-    console.error("Cron error:", err);
-  }
-}, 60000); // runs every 60 seconds
+app.get("/ping",(req,res)=>{
+res.send("alive");
+});
