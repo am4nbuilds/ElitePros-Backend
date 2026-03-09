@@ -27,7 +27,7 @@ process.exit(1);
 /* ================= CORS ================= */
 
 const allowedOrigins = [
-"https://testingwithme.infinityfree.me",
+"https://c.am4n-builds.workers.dev",
 "https://elitepros-backend.onrender.com"
 ];
 
