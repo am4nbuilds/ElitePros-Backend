@@ -721,7 +721,7 @@ res.json({status:"DELETED"});
 });
 
 /* ======================================================
-USER HOME - GET DASHBOARD DATA
+USER HOME - GET DASHBOARD DATA (OPTIMIZED NO CACHE)
 ====================================================== */
 
 app.get("/api/home", verifyFirebaseToken, async (req, res) => {
@@ -729,7 +729,19 @@ app.get("/api/home", verifyFirebaseToken, async (req, res) => {
 
     const uid = req.uid;
 
-    const userSnap = await db.ref(`users/${uid}`).once("value");
+    /* FETCH ALL DATA IN PARALLEL */
+    const [
+      userSnap,
+      announcementSnap,
+      bannerSnap,
+      gameModesSnap
+    ] = await Promise.all([
+      db.ref(`users/${uid}`).once("value"),
+      db.ref("announcements").orderByChild("timestamp").limitToLast(1).once("value"),
+      db.ref("banners").once("value"),
+      db.ref("gameModes").once("value")
+    ]);
+
     const user = userSnap.val();
 
     if (!user) {
@@ -737,49 +749,45 @@ app.get("/api/home", verifyFirebaseToken, async (req, res) => {
     }
 
     if (user.status === "banned") {
-      return res.json({ banned: true, reason: user.banReason || "Account suspended" });
+      return res.json({
+        banned: true,
+        reason: user.banReason || "Account suspended"
+      });
     }
 
-    const wallet = user.wallet || { deposited: 0, winnings: 0 };
-
-    const totalBalance =
-      Number(wallet.deposited || 0) +
-      Number(wallet.winnings || 0);
+    /* WALLET */
+    const wallet = user.wallet || {};
+    const deposited = Number(wallet.deposited || 0);
+    const winnings = Number(wallet.winnings || 0);
 
     /* ANNOUNCEMENT */
-    const announcementSnap = await db
-      .ref("announcements")
-      .orderByChild("timestamp")
-      .limitToLast(1)
-      .once("value");
-
     let announcement = "Welcome to ElitePros!";
 
-    if (announcementSnap.exists()) {
+    if (announcementSnap.val()) {
       const val = Object.values(announcementSnap.val())[0];
-      if (val.active !== false) {
+      if (val && val.active !== false) {
         announcement = val.message || val.title || announcement;
       }
     }
 
     /* BANNERS */
-    const bannerSnap = await db.ref("banners").once("value");
-
     let banners = [];
 
-    if (bannerSnap.exists()) {
-      banners = Object.values(bannerSnap.val())
+    const bannersRaw = bannerSnap.val();
+
+    if (bannersRaw) {
+      banners = Object.values(bannersRaw)
         .filter(b => b.active !== false)
         .sort((a, b) => (a.order || 999) - (b.order || 999));
     }
 
     /* GAME MODES */
-    const gameModesSnap = await db.ref("gameModes").once("value");
-
     let gameModes = [];
 
-    if (gameModesSnap.exists()) {
-      gameModes = Object.values(gameModesSnap.val())
+    const modesRaw = gameModesSnap.val();
+
+    if (modesRaw) {
+      gameModes = Object.values(modesRaw)
         .filter(m => m.active !== false)
         .sort((a, b) => (a.order || 999) - (b.order || 999));
     }
@@ -790,9 +798,9 @@ app.get("/api/home", verifyFirebaseToken, async (req, res) => {
         username: user.username || user.email?.split("@")[0] || "Player"
       },
       wallet: {
-        deposited: Number(wallet.deposited || 0),
-        winnings: Number(wallet.winnings || 0),
-        total: totalBalance
+        deposited,
+        winnings,
+        total: deposited + winnings
       },
       announcement,
       banners,
