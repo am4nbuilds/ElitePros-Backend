@@ -310,7 +310,7 @@ const { matchId, ign } = req.body;
 if(!matchId || !ign)
 return res.json({error:"INVALID_DATA"});
 
-const matchRef = db.ref(`matches/${matchId}`);
+const matchRef = db.ref(`matches/upcoming/${matchId}`);
 const walletRef = db.ref(`users/${uid}/wallet`);
 
 /* ======================================================
