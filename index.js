@@ -294,7 +294,7 @@ res.status(500).send("Error");
 });
 
 /* ======================================================
-JOIN MATCH (RACE CONDITION SAFE - FIXED)
+JOIN MATCH (PRODUCTION SAFE)
 ====================================================== */
 
 app.post(
@@ -308,18 +308,26 @@ const uid = req.uid;
 const { matchId, ign } = req.body;
 
 if(!matchId || !ign)
-return res.json({ error:"INVALID_DATA" });
+return res.json({error:"INVALID_DATA"});
 
-/* REFS */
-
-const matchRef = db.ref(`matches/upcoming/${matchId}`);
+const matchRef = db.ref(`matches/${matchId}`);
 const walletRef = db.ref(`users/${uid}/wallet`);
 
 /* ======================================================
-ATOMIC SLOT LOCK
+STEP 1 — READ WALLET FIRST (PREVENT NULL TRANSACTION)
 ====================================================== */
 
-const slotTxn = await matchRef.transaction(match => {
+const walletSnap = await walletRef.once("value");
+const wallet = walletSnap.val() || {};
+
+let dep = Number(wallet.deposited || 0);
+let win = Number(wallet.winnings || 0);
+
+/* ======================================================
+STEP 2 — SLOT LOCK (ATOMIC)
+====================================================== */
+
+const slotTxn = await matchRef.transaction(match=>{
 
 if(!match) return match;
 
@@ -331,98 +339,109 @@ match.players = {};
 if(match.players[uid])
 return match;
 
-/* calculate joined players */
+/* count players */
 
-const joinedCount = Object.keys(match.players).length;
+const joinedCount =
+Object.keys(match.players).length;
 
-/* check slot limit */
+/* check slots */
 
 if(joinedCount >= match.slots)
 return;
 
 /* lock slot */
 
-match.players[uid] = { _locking:true };
+match.players[uid] = {_locking:true};
 
 return match;
 
 });
 
 if(!slotTxn.committed)
-return res.json({ error:"MATCH_FULL" });
+return res.json({error:"MATCH_FULL"});
 
 const matchData = slotTxn.snapshot.val();
 const entryFee = Number(matchData.entryFee || 0);
 
 /* ======================================================
-WALLET DEDUCTION (ATOMIC)
+STEP 3 — CHECK BALANCE
+====================================================== */
+
+if(dep + win < entryFee){
+
+/* rollback slot */
+
+await matchRef.transaction(match=>{
+if(match?.players?.[uid])
+delete match.players[uid];
+return match;
+});
+
+return res.json({error:"INSUFFICIENT_BALANCE"});
+}
+
+/* ======================================================
+STEP 4 — WALLET TRANSACTION
 ====================================================== */
 
 let depositUsed = 0;
 let winningsUsed = 0;
 
-const walletTxn = await walletRef.transaction(wallet => {
+const walletTxn = await walletRef.transaction(wallet=>{
 
 wallet = wallet || {};
 
-let dep = Number(wallet.deposited || 0);
-let win = Number(wallet.winnings || 0);
+let d = Number(wallet.deposited || 0);
+let w = Number(wallet.winnings || 0);
 
-if(dep + win < entryFee)
-return; // abort transaction
+if(d + w < entryFee)
+return;
 
-if(dep >= entryFee){
+if(d >= entryFee){
 
 depositUsed = entryFee;
-dep -= entryFee;
+d -= entryFee;
 
 }else{
 
-depositUsed = dep;
-winningsUsed = entryFee - dep;
+depositUsed = d;
+winningsUsed = entryFee - d;
 
-dep = 0;
-win -= winningsUsed;
+d = 0;
+w -= winningsUsed;
 
 }
 
-wallet.deposited = dep;
-wallet.winnings = win;
+wallet.deposited = d;
+wallet.winnings = w;
 
 return wallet;
 
 });
 
-/* ======================================================
-ROLLBACK SLOT IF WALLET FAILED
-====================================================== */
+/* WALLET FAILED */
 
 if(!walletTxn.committed){
 
-await matchRef.transaction(match => {
-
-if(!match) return match;
-
-if(match.players && match.players[uid])
+await matchRef.transaction(match=>{
+if(match?.players?.[uid])
 delete match.players[uid];
-
 return match;
-
 });
 
-return res.json({ error:"INSUFFICIENT_BALANCE" });
-
+return res.json({error:"INSUFFICIENT_BALANCE"});
 }
 
 /* ======================================================
-FINAL SAVE
+STEP 5 — FINAL SAVE
 ====================================================== */
 
-const publicMatchId = matchData.matchId || matchId;
+const publicMatchId =
+matchData.matchId || matchId;
 
 await db.ref().update({
 
-[`matches/upcoming/${matchId}/players/${uid}`]:{
+[`matches/${matchId}/players/${uid}`]:{
 ign,
 depositUsed,
 winningsUsed,
@@ -446,13 +465,13 @@ timestamp:Date.now()
 
 });
 
-res.json({ status:"SUCCESS" });
+res.json({status:"SUCCESS"});
 
 }catch(err){
 
 console.error("JOIN ERROR:",err);
 
-res.status(500).json({ error:"SERVER_ERROR" });
+res.status(500).json({error:"SERVER_ERROR"});
 
 }
 
