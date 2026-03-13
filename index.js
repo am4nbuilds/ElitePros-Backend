@@ -293,68 +293,7 @@ res.status(500).send("Error");
 }
 });
 
-/* ======================================================
-JOIN MATCH (PRODUCTION SAFE)
-====================================================== */
-
-app.post(
-"/join-match",
-verifyFirebaseToken,
-async (req,res)=>{
-
-try{
-
-const uid = req.uid;
-const { matchId, ign } = req.body;
-
-if(!matchId || !ign)
-return res.json({error:"INVALID_DATA"});
-
-const matchRef = db.ref(`matches/upcoming/${matchId}`);
-const walletRef = db.ref(`users/${uid}/wallet`);
-
-/* ======================================================
-STEP 1 — READ WALLET FIRST (PREVENT NULL TRANSACTION)
-====================================================== */
-
-const walletSnap = await walletRef.once("value");
-const wallet = walletSnap.val() || {};
-
-let dep = Number(wallet.deposited || 0);
-let win = Number(wallet.winnings || 0);
-
-/* ======================================================
-STEP 2 — SLOT LOCK (ATOMIC)
-====================================================== */
-
-const slotTxn = await matchRef.transaction(match=>{
-
-if(!match) return match;
-
-if(!match.players)
-match.players = {};
-
-/* already joined */
-
-if(match.players[uid])
-return match;
-
-/* count players */
-
-const joinedCount =
-Object.keys(match.players).length;
-
-/* check slots */
-
-if(joinedCount >= match.slots)
-return;
-
-/* lock slot */
-
-match.players[uid] = {_locking:true};
-
-return match;
-
+.
 });
 
 if(!slotTxn.committed)
@@ -467,11 +406,169 @@ timestamp:Date.now()
 
 res.json({status:"SUCCESS"});
 
+/* ======================================================
+JOIN MATCH (STABLE + RACE SAFE)
+====================================================== */
+
+app.post(
+"/join-match",
+verifyFirebaseToken,
+async (req,res)=>{
+
+try{
+
+const uid = req.uid;
+const {matchId,ign} = req.body;
+
+if(!matchId || !ign)
+return res.json({error:"INVALID_DATA"});
+
+const matchRef =
+db.ref(`matches/upcoming/${matchId}`);
+
+const walletRef =
+db.ref(`users/${uid}/wallet`);
+
+/* ======================================================
+LOCK SLOT (TRANSACTION)
+====================================================== */
+
+const matchTxn =
+await matchRef.transaction(match=>{
+
+if(!match) return match;
+
+if(!match.players)
+match.players = {};
+
+if(match.players[uid])
+return match;
+
+const count =
+Object.keys(match.players).length;
+
+if(count >= match.slots)
+return;
+
+match.players[uid] = {_locking:true};
+
+return match;
+
+});
+
+if(!matchTxn.committed)
+return res.json({error:"MATCH_FULL"});
+
+const matchData =
+matchTxn.snapshot.val() || {};
+
+const entryFee =
+Number(matchData.entryFee || 0);
+
+const publicMatchId =
+matchData.matchId || matchId;
+
+/* ======================================================
+READ WALLET (OLD WORKING METHOD)
+====================================================== */
+
+const walletSnap =
+await walletRef.once("value");
+
+const wallet =
+walletSnap.val() || {};
+
+let dep =
+Number(wallet.deposited || 0);
+
+let win =
+Number(wallet.winnings || 0);
+
+/* BALANCE CHECK */
+
+if(dep + win < entryFee){
+
+/* ROLLBACK SLOT */
+
+await matchRef.transaction(match=>{
+
+if(match?.players?.[uid])
+delete match.players[uid];
+
+return match;
+
+});
+
+return res.json({
+error:"INSUFFICIENT_BALANCE"
+});
+}
+
+/* ======================================================
+DEDUCT WALLET
+====================================================== */
+
+let depositUsed = 0;
+let winningsUsed = 0;
+
+if(dep >= entryFee){
+
+depositUsed = entryFee;
+dep -= entryFee;
+
+}else{
+
+depositUsed = dep;
+winningsUsed = entryFee - dep;
+
+dep = 0;
+win -= winningsUsed;
+}
+
+await walletRef.update({
+deposited:dep,
+winnings:win
+});
+
+/* ======================================================
+FINAL SAVE
+====================================================== */
+
+await db.ref().update({
+
+[`matches/upcoming/${matchId}/players/${uid}`]:{
+ign,
+depositUsed,
+winningsUsed,
+joinedAt:Date.now()
+},
+
+[`users/${uid}/myMatches/${matchId}`]:{
+joinedAt:Date.now()
+},
+
+[`users/${uid}/ign`]:ign,
+
+[`users/${uid}/transactions/${publicMatchId}_Join`]:{
+transactionId:`${publicMatchId}_Join`,
+type:"entry",
+amount:-entryFee,
+status:"success",
+reason:"Match Joined",
+timestamp:Date.now()
+}
+
+});
+
+res.json({status:"SUCCESS"});
+
 }catch(err){
 
 console.error("JOIN ERROR:",err);
 
-res.status(500).json({error:"SERVER_ERROR"});
+res.status(500).json({
+error:"SERVER_ERROR"
+});
 
 }
 
