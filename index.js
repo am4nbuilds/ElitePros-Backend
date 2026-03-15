@@ -293,118 +293,7 @@ res.status(500).send("Error");
 }
 });
 
-.
-});
 
-if(!slotTxn.committed)
-return res.json({error:"MATCH_FULL"});
-
-const matchData = slotTxn.snapshot.val();
-const entryFee = Number(matchData.entryFee || 0);
-
-/* ======================================================
-STEP 3 — CHECK BALANCE
-====================================================== */
-
-if(dep + win < entryFee){
-
-/* rollback slot */
-
-await matchRef.transaction(match=>{
-if(match?.players?.[uid])
-delete match.players[uid];
-return match;
-});
-
-return res.json({error:"INSUFFICIENT_BALANCE"});
-}
-
-/* ======================================================
-STEP 4 — WALLET TRANSACTION
-====================================================== */
-
-let depositUsed = 0;
-let winningsUsed = 0;
-
-const walletTxn = await walletRef.transaction(wallet=>{
-
-wallet = wallet || {};
-
-let d = Number(wallet.deposited || 0);
-let w = Number(wallet.winnings || 0);
-
-if(d + w < entryFee)
-return;
-
-if(d >= entryFee){
-
-depositUsed = entryFee;
-d -= entryFee;
-
-}else{
-
-depositUsed = d;
-winningsUsed = entryFee - d;
-
-d = 0;
-w -= winningsUsed;
-
-}
-
-wallet.deposited = d;
-wallet.winnings = w;
-
-return wallet;
-
-});
-
-/* WALLET FAILED */
-
-if(!walletTxn.committed){
-
-await matchRef.transaction(match=>{
-if(match?.players?.[uid])
-delete match.players[uid];
-return match;
-});
-
-return res.json({error:"INSUFFICIENT_BALANCE"});
-}
-
-/* ======================================================
-STEP 5 — FINAL SAVE
-====================================================== */
-
-const publicMatchId =
-matchData.matchId || matchId;
-
-await db.ref().update({
-
-[`matches/${matchId}/players/${uid}`]:{
-ign,
-depositUsed,
-winningsUsed,
-joinedAt:Date.now()
-},
-
-[`users/${uid}/myMatches/${matchId}`]:{
-joinedAt:Date.now()
-},
-
-[`users/${uid}/ign`]:ign,
-
-[`users/${uid}/transactions/${publicMatchId}_Join`]:{
-transactionId:`${publicMatchId}_Join`,
-type:"entry",
-amount:-entryFee,
-status:"success",
-reason:"Match Joined",
-timestamp:Date.now()
-}
-
-});
-
-res.json({status:"SUCCESS"});
 
 /* ======================================================
 JOIN MATCH (STABLE + RACE SAFE)
@@ -540,6 +429,121 @@ await db.ref().update({
 ign,
 depositUsed,
 winningsUsed,
+/* ======================================================
+JOIN MATCH (STABLE BALANCE + RACE SAFE SLOT)
+====================================================== */
+
+app.post("/join-match", verifyFirebaseToken, async (req,res)=>{
+
+try{
+
+const uid = req.uid;
+const {matchId,ign} = req.body;
+
+if(!matchId || !ign)
+return res.json({error:"INVALID_DATA"});
+
+const matchRef = db.ref(`matches/upcoming/${matchId}`);
+const walletRef = db.ref(`users/${uid}/wallet`);
+
+/* ======================================================
+STEP 1 — READ WALLET FIRST (same logic as old endpoint)
+====================================================== */
+
+const walletSnap = await walletRef.once("value");
+
+const wallet = walletSnap.val() || {};
+
+let dep = Number(wallet.deposited ?? 0);
+let win = Number(wallet.winnings ?? 0);
+
+console.log("Wallet:",dep,win);   // debug
+
+/* ======================================================
+STEP 2 — GET MATCH
+====================================================== */
+
+const matchSnap = await matchRef.once("value");
+
+if(!matchSnap.exists())
+return res.json({error:"MATCH_NOT_FOUND"});
+
+const matchData = matchSnap.val();
+
+const entryFee = Number(matchData.entryFee ?? 0);
+
+/* BALANCE CHECK */
+
+if(dep + win < entryFee)
+return res.json({error:"INSUFFICIENT_BALANCE"});
+
+/* ======================================================
+STEP 3 — SLOT LOCK (TRANSACTION)
+====================================================== */
+
+const slotTxn = await matchRef.transaction(match=>{
+
+if(!match) return match;
+
+if(!match.players)
+match.players = {};
+
+if(match.players[uid])
+return match;
+
+const count = Object.keys(match.players).length;
+
+if(count >= match.slots)
+return;
+
+match.players[uid] = {_locking:true};
+
+return match;
+
+});
+
+if(!slotTxn.committed)
+return res.json({error:"MATCH_FULL"});
+
+/* ======================================================
+STEP 4 — WALLET DEDUCTION
+====================================================== */
+
+let depositUsed = 0;
+let winningsUsed = 0;
+
+if(dep >= entryFee){
+
+depositUsed = entryFee;
+dep -= entryFee;
+
+}else{
+
+depositUsed = dep;
+winningsUsed = entryFee - dep;
+
+dep = 0;
+win -= winningsUsed;
+
+}
+
+await walletRef.update({
+deposited:dep,
+winnings:win
+});
+
+/* ======================================================
+STEP 5 — FINAL SAVE
+====================================================== */
+
+const publicMatchId = matchData.matchId || matchId;
+
+await db.ref().update({
+
+[`matches/upcoming/${matchId}/players/${uid}`]:{
+ign,
+depositUsed,
+winningsUsed,
 joinedAt:Date.now()
 },
 
@@ -565,10 +569,7 @@ res.json({status:"SUCCESS"});
 }catch(err){
 
 console.error("JOIN ERROR:",err);
-
-res.status(500).json({
-error:"SERVER_ERROR"
-});
+res.status(500).json({error:"SERVER_ERROR"});
 
 }
 
