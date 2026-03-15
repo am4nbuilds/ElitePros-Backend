@@ -1189,127 +1189,227 @@ app.get("/api/wallet/transactions", verifyFirebaseToken, async (req, res) => {
 });
 
 /* ======================================================
-USER - GET MATCHES (PAGINATED BY STATUS)
+USER - GET MATCHES (TOURNAMENT LIST OPTIMIZED)
+Reads from:
+matches/{status}/{matchId}
+
+Card data stored in:
+matchDetails
 ====================================================== */
 
-app.get("/api/matches", verifyFirebaseToken, async (req, res) => {
-  try {
+app.get("/api/matches", verifyFirebaseToken, async (req,res)=>{
 
-    const uid = req.uid;
-    const status = req.query.status || "upcoming";
-    const limit = parseInt(req.query.limit) || 10;
-    const cursor = req.query.cursor ? Number(req.query.cursor) : null;
+try{
 
-    if (!["upcoming", "ongoing", "completed"].includes(status)) {
-      return res.status(400).json({ error: "INVALID_STATUS" });
-    }
+/* USER UID */
 
-    let query = db
-      .ref(`matches/${status}`)
-      .orderByChild("matchTimings/scheduleTime");
+const uid = req.uid;
 
-    if (cursor) {
-      query = query.endBefore(cursor);
-    }
+/* QUERY PARAMETERS */
 
-    const snap = await query.limitToLast(limit).once("value");
+const status = req.query.status || "upcoming";
+const limit = parseInt(req.query.limit) || 10;
+const cursor = req.query.cursor ? Number(req.query.cursor) : null;
 
-    if (!snap.exists()) {
-      return res.json({
-        matches: [],
-        hasMore: false
-      });
-    }
+/* VALIDATE STATUS */
 
-    const matches = [];
+if(!["upcoming","ongoing","completed"].includes(status)){
+return res.status(400).json({error:"INVALID_STATUS"});
+}
 
-    snap.forEach(child => {
+/* FIREBASE QUERY */
 
-      const match = child.val();
-      const players = match.players || {};
+let query = db
+.ref(`matches/${status}`)
+.orderByChild("matchDetails/schedule");
 
-      matches.push({
-        id: child.key,
-        matchId: match.matchId || child.key,
-        name: match.name,
-        banner: match.banner || "",
-        entryFee: Number(match.entryFee || 0),
-        prizePool: Number(match.prizePool || 0),
-        perKill: Number(match.perKill || 0),
-        slots: Number(match.slots || 0),
-        joinedCount: Object.keys(players).length,
-        isJoined: !!players[uid],
-        scheduleTime: match.matchTimings?.scheduleTime || 0
-      });
+/* PAGINATION */
 
-    });
+if(cursor){
+query = query.endBefore(cursor);
+}
 
-    matches.sort((a, b) => b.scheduleTime - a.scheduleTime);
+/* FETCH MATCHES */
 
-    res.json({
-      matches,
-      hasMore: matches.length === limit,
-      nextCursor:
-        matches.length > 0
-          ? matches[matches.length - 1].scheduleTime
-          : null
-    });
+const snap = await query
+.limitToLast(limit)
+.once("value");
 
-  } catch (err) {
-    console.error("MATCHES API ERROR:", err);
-    res.status(500).json({ error: "SERVER_ERROR" });
-  }
+/* EMPTY RESULT */
+
+if(!snap.exists()){
+return res.json({
+matches:[],
+hasMore:false
+});
+}
+
+const matches=[];
+
+/* BUILD RESPONSE */
+
+snap.forEach(child=>{
+
+const match = child.val();
+
+/* MATCH CARD DATA */
+
+const d = match.matchDetails || {};
+
+/* PLAYER INFO */
+
+const players = match.players || {};
+
+matches.push({
+
+id: child.key,
+
+/* MATCH CARD FIELDS */
+
+title: d.title || "Match",
+
+banner: d.banner || "",
+
+matchId: d.matchId || child.key,
+
+schedule: d.schedule || 0,
+
+prizePool: Number(d.prizePool || 0),
+
+perKill: Number(d.perKill || 0),
+
+entryFee: Number(d.entryFee || 0),
+
+type: d.type || "",
+
+platform: d.platform || "",
+
+map: d.map || "",
+
+gameMode: d.gameMode || "",
+
+slots: Number(d.slots || 0),
+
+/* JOIN INFO */
+
+joinedCount: Number(match.joinedCount || 0),
+
+isJoined: !!players[uid]
+
+});
+
+});
+
+/* SORT BY SCHEDULE */
+
+matches.sort((a,b)=>b.schedule-a.schedule);
+
+/* RESPONSE */
+
+res.json({
+
+matches,
+
+hasMore: matches.length===limit,
+
+nextCursor:
+matches.length>0
+?matches[matches.length-1].schedule
+:null
+
+});
+
+}catch(err){
+
+console.error("MATCHES API ERROR:",err);
+
+res.status(500).json({error:"SERVER_ERROR"});
+
+}
+
 });
 
 /* ======================================================
-USER - GET MATCH DETAILS (UPCOMING ONLY)
+USER - GET MATCH DETAILS
+Reads full match data for join page
 ====================================================== */
 
 app.get(
-  "/api/match/:matchId",
-  verifyFirebaseToken,
-  async (req, res) => {
-    try {
-      const { matchId } = req.params;
-      const uid = req.uid;
+"/api/match/:matchId",
+verifyFirebaseToken,
+async(req,res)=>{
 
-      const matchSnap = await db
-        .ref(`matches/upcoming/${matchId}`)
-        .once("value");
+try{
 
-      if (!matchSnap.exists()) {
-        return res.status(404).json({ error: "MATCH_NOT_FOUND" });
-      }
+const uid = req.uid;
 
-      const match = matchSnap.val();
-      const players = match.players || {};
-      const joinedCount = Object.keys(players).length;
-      const isJoined = !!players[uid];
+const {matchId} = req.params;
 
-      res.json({
-        id: matchId,
-        matchId: match.matchId || matchId,
-        name: match.title || "Match",
-        banner: match.banner || "",
-        entryFee: Number(match.entryFee || 0),
-        prizePool: Number(match.prizePool || 0),
-        perKill: Number(match.perKill || 0),
-        type: match.type || "Solo",
-        platform: match.platform || "Mobile",
-        map: match.map || "N/A",
-        slots: Number(match.totalSlots || 0),
-        joinedCount,
-        isJoined,
-        scheduleTime: match.matchTime || 0,
-        status: "upcoming"
-      });
+/* FETCH MATCH */
 
-    } catch (err) {
-      console.error("MATCH DETAILS ERROR:", err);
-      res.status(500).json({ error: "SERVER_ERROR" });
-    }
-  }
-);
+const snap = await db
+.ref(`matches/upcoming/${matchId}`)
+.once("value");
+
+/* NOT FOUND */
+
+if(!snap.exists()){
+return res.status(404).json({error:"MATCH_NOT_FOUND"});
+}
+
+const match = snap.val();
+
+/* MATCH DETAILS */
+
+const d = match.matchDetails || {};
+
+const players = match.players || {};
+
+/* RESPONSE */
+
+res.json({
+
+id: matchId,
+
+title: d.title || "Match",
+
+banner: d.banner || "",
+
+matchId: d.matchId || matchId,
+
+schedule: d.schedule || 0,
+
+prizePool: Number(d.prizePool || 0),
+
+perKill: Number(d.perKill || 0),
+
+entryFee: Number(d.entryFee || 0),
+
+type: d.type || "",
+
+platform: d.platform || "",
+
+map: d.map || "",
+
+gameMode: d.gameMode || "",
+
+slots: Number(d.slots || 0),
+
+joinedCount: Number(match.joinedCount || 0),
+
+isJoined: !!players[uid]
+
+});
+
+}catch(err){
+
+console.error("MATCH DETAILS ERROR:",err);
+
+res.status(500).json({error:"SERVER_ERROR"});
+
+}
+
+});
 
 app.get("/ping",(req,res)=>{
 res.send("alive");
