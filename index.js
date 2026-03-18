@@ -102,53 +102,83 @@ res.json({status:"OK"})
 );
 
 /* ======================================================
-CREATE PAYMENT
+CREATE PAYMENT (FIXED & STABLE)
 ====================================================== */
 
-app.post("/create-payment",
+app.post(
+"/create-payment",
 verifyFirebaseToken,
-async(req,res)=>{
+async (req,res)=>{
 
 try{
 
-const uid=req.uid;
-const amount=Number(req.body.amount);
+const uid = req.uid;
+const amount = Number(req.body.amount);
 
-if(!Number.isFinite(amount)||amount<1)
-return res.status(400)
-.json({error:"Invalid amount"});
+if(!Number.isFinite(amount) || amount < 1){
+return res.status(400).json({error:"Invalid amount"});
+}
 
-const orderId="ORD"+Date.now();
+const orderId = "ORD" + Date.now();
 
-const redirectUrl=
+const redirectUrl =
 "https://testingwithme.infinityfree.me/wallet.html";
 
-const body=new URLSearchParams({
-token_key:process.env.ZAPUPI_API_KEY,
-secret_key:process.env.ZAPUPI_SECRET_KEY,
-amount:amount.toString(),
-order_id:orderId,
-remark:"Wallet Deposit",
-redirect_url:redirectUrl
-});
+/* ================= CREATE FORM BODY ================= */
 
-const zapupiRes=await fetch(
+const params = new URLSearchParams();
+
+params.append("token_key", process.env.ZAPUPI_API_KEY);
+params.append("secret_key", process.env.ZAPUPI_SECRET_KEY);
+params.append("amount", amount.toString());
+params.append("order_id", orderId);
+params.append("remark", "Wallet Deposit");
+params.append("redirect_url", redirectUrl);
+
+/* ================= CALL ZAPUPI ================= */
+
+const zapupiRes = await fetch(
 "https://api.zapupi.com/api/create-order",
 {
 method:"POST",
 headers:{
-"Content-Type":
-"application/x-www-form-urlencoded"
+"Content-Type":"application/x-www-form-urlencoded",
+"Accept":"application/json"
 },
-body:body.toString()
+body: params.toString()
+}
+);
+
+/* ================= HANDLE BAD RESPONSE ================= */
+
+const text = await zapupiRes.text();
+
+let zapupi;
+
+try{
+zapupi = JSON.parse(text);
+}catch{
+
+console.error("ZAPUPI INVALID RESPONSE:", text);
+
+return res.status(502).json({
+error:"Invalid gateway response"
 });
 
-const zapupi=
-JSON.parse(await zapupiRes.text());
+}
 
-if(zapupi.status!=="success")
-return res.status(502)
-.json({error:"Gateway error"});
+/* ================= VALIDATE RESPONSE ================= */
+
+if(!zapupi || zapupi.status !== "success"){
+
+console.error("ZAPUPI ERROR:", zapupi);
+
+return res.status(502).json({
+error:"Gateway error"
+});
+}
+
+/* ================= SAVE TRANSACTION ================= */
 
 await db.ref(
 `users/${uid}/transactions/${orderId}`
@@ -160,6 +190,8 @@ status:"pending",
 timestamp:Date.now()
 });
 
+/* ================= SAVE ORDER ================= */
+
 await db.ref(`orders/${orderId}`).set({
 uid,
 amount,
@@ -168,18 +200,23 @@ locked:false,
 createdAt:Date.now()
 });
 
+/* ================= RETURN PAYMENT LINK ================= */
+
 res.json({
 order_id:orderId,
-payment_url:zapupi.payment_url
+payment_url: zapupi.payment_url
 });
 
-}catch(e){
+}catch(err){
 
-console.error("CREATE PAYMENT ERROR:",e);
+console.error("CREATE PAYMENT ERROR:", err);
 
-res.status(500)
-.json({error:"Create payment failed"});
+res.status(500).json({
+error:"Create payment failed"
+});
+
 }
+
 });
 
 /* ======================================================
