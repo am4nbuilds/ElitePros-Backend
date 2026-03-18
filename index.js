@@ -1,4 +1,4 @@
-import express from "express";
+aimport express from "express";
 import cors from "cors";
 import admin from "firebase-admin";
 import fetch from "node-fetch";
@@ -102,7 +102,7 @@ res.json({status:"OK"})
 );
 
 /* ======================================================
-CREATE PAYMENT (FIXED & STABLE)
+CREATE PAYMENT (WITH REAL GATEWAY RESPONSE LOGGING)
 ====================================================== */
 
 app.post(
@@ -115,16 +115,15 @@ try{
 const uid = req.uid;
 const amount = Number(req.body.amount);
 
-if(!Number.isFinite(amount) || amount < 1){
+if(!Number.isFinite(amount) || amount < 1)
 return res.status(400).json({error:"Invalid amount"});
-}
 
 const orderId = "ORD" + Date.now();
 
 const redirectUrl =
 "https://testingwithme.infinityfree.me/wallet.html";
 
-/* ================= CREATE FORM BODY ================= */
+/* ================= BUILD REQUEST BODY ================= */
 
 const params = new URLSearchParams();
 
@@ -134,6 +133,10 @@ params.append("amount", amount.toString());
 params.append("order_id", orderId);
 params.append("remark", "Wallet Deposit");
 params.append("redirect_url", redirectUrl);
+
+/* ================= DEBUG REQUEST ================= */
+
+console.log("ZAPUPI REQUEST:", params.toString());
 
 /* ================= CALL ZAPUPI ================= */
 
@@ -149,62 +152,71 @@ body: params.toString()
 }
 );
 
-/* ================= HANDLE BAD RESPONSE ================= */
+/* ================= RAW RESPONSE ================= */
 
-const text = await zapupiRes.text();
+const rawResponse = await zapupiRes.text();
+
+console.log("ZAPUPI RAW RESPONSE:", rawResponse);
+
+/* ================= STORE RESPONSE ================= */
+
+await db.ref("gatewayLogs/${orderId}").set({
+timestamp: Date.now(),
+request: params.toString(),
+response: rawResponse
+});
+
+/* ================= SAFE JSON PARSE ================= */
 
 let zapupi;
 
 try{
-zapupi = JSON.parse(text);
+zapupi = JSON.parse(rawResponse);
 }catch{
 
-console.error("ZAPUPI INVALID RESPONSE:", text);
-
 return res.status(502).json({
-error:"Invalid gateway response"
+error:"Invalid gateway response",
+raw: rawResponse
 });
 
 }
 
-/* ================= VALIDATE RESPONSE ================= */
+/* ================= CHECK GATEWAY STATUS ================= */
 
-if(!zapupi || zapupi.status !== "success"){
-
-console.error("ZAPUPI ERROR:", zapupi);
+if(zapupi.status !== "success"){
 
 return res.status(502).json({
-error:"Gateway error"
+error:"Gateway error",
+gateway: zapupi
 });
+
 }
 
 /* ================= SAVE TRANSACTION ================= */
 
-await db.ref(
-`users/${uid}/transactions/${orderId}`
-).set({
-transactionId:orderId,
-type:"deposit",
+await db.ref("users/${uid}/transactions/${orderId}").set({
+transactionId: orderId,
+type: "deposit",
 amount,
-status:"pending",
-timestamp:Date.now()
+status: "pending",
+timestamp: Date.now()
 });
 
 /* ================= SAVE ORDER ================= */
 
-await db.ref(`orders/${orderId}`).set({
+await db.ref("orders/${orderId}").set({
 uid,
 amount,
 status:"pending",
 locked:false,
-createdAt:Date.now()
+createdAt: Date.now()
 });
 
-/* ================= RETURN PAYMENT LINK ================= */
+/* ================= RETURN REAL RESPONSE ================= */
 
 res.json({
-order_id:orderId,
-payment_url: zapupi.payment_url
+order_id: orderId,
+gateway_response: zapupi
 });
 
 }catch(err){
@@ -212,12 +224,14 @@ payment_url: zapupi.payment_url
 console.error("CREATE PAYMENT ERROR:", err);
 
 res.status(500).json({
-error:"Create payment failed"
+error:"Create payment failed",
+message: err.message
 });
 
 }
 
 });
+
 
 /* ======================================================
 WEBHOOK
