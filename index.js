@@ -1467,19 +1467,15 @@ res.send("alive");
 });
 
 
-app.get("/test-zapupi", async (req,res)=>{
+app.get("/verify-token", async (req, res) => {
+  try {
+    const token = req.headers.authorization?.split("Bearer ")[1];
+    if (!token) return res.status(401).json({ error: "No token" });
 
-try{
+    const decoded = await admin.auth().verifyIdToken(token);
+    res.json({ uid: decoded.uid });
 
-const r = await fetch("https://api.zapupi.com");
-
-res.json({status:r.status});
-
-}catch(e){
-
-console.log(e);
-res.json({error:"cannot reach zapupi"});
-
-}
-
+  } catch {
+    res.status(401).json({ error: "Invalid token" });
+  }
 });
