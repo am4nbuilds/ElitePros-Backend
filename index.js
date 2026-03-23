@@ -2,7 +2,8 @@ import express from "express";
 import cors from "cors";
 import admin from "firebase-admin";
 import fetch from "node-fetch";
-import { runCronJobs } from "./services/leaderboardCron.js";
+import createPaymentRoute from "./routes/createPayment.js";
+
 
 const app = express();
 /* ================= ENV ================= */
@@ -51,7 +52,7 @@ app.options("*",cors());
 
 app.use(express.json());
 app.use(express.urlencoded({extended:true}));
-
+app.use("/create-payment-test", createPaymentRoute);
 /* ================= FIREBASE ================= */
 
 if(!admin.apps.length){
