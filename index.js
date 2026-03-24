@@ -107,7 +107,7 @@ CREATE PAYMENT (WITH REAL GATEWAY RESPONSE LOGGING)
 ====================================================== */
 
 app.post(
-"/create-payment",
+"/create-payment-zapupi",
 verifyFirebaseToken,
 async (req,res)=>{
 
@@ -1487,12 +1487,10 @@ import crypto from "crypto";
 app.post("/cashfree-webhook", async (req, res) => {
   try {
     const signature = req.headers["x-webhook-signature"];
-    const body = JSON.stringify(req.body);
 
-    // 🔐 VERIFY SIGNATURE USING CASHFREE SECRET KEY
     const expected = crypto
       .createHmac("sha256", process.env.CASHFREE_SECRET_KEY)
-      .update(body)
+      .update(req.rawBody) // ✅ FIXED
       .digest("base64");
 
     if (signature !== expected) {
@@ -1512,35 +1510,24 @@ app.post("/cashfree-webhook", async (req, res) => {
     const amount = Number(req.body.data.order.order_amount);
     const paymentId = req.body.data.payment.cf_payment_id;
 
-    // 🔍 get order
     const snap = await db.ref(`orders/${orderId}`).once("value");
 
-    if (!snap.exists()) {
-      return res.send("order not found");
-    }
+    if (!snap.exists()) return res.send("order not found");
 
     const order = snap.val();
 
-    // 🛑 prevent double credit
-    if (order.status === "success") {
-      return res.send("already processed");
-    }
+    if (order.status === "success") return res.send("already");
 
     const uid = order.uid;
 
-    // 💰 atomic wallet update
-    await db.ref(`users/${uid}/wallet`).transaction((balance) => {
-      return (Number(balance) || 0) + amount;
-    });
+    // ✅ FIXED WALLET UPDATE
+    await db.ref(`users/${uid}/wallet/deposited`)
+      .transaction(v => (Number(v) || 0) + amount);
 
-    // 🧾 update order + transaction
     await db.ref().update({
-      [`orders/${orderId}`]: {
-        ...order,
-        status: "success",
-        paymentId,
-        updatedAt: Date.now()
-      },
+      [`orders/${orderId}/status`]: "success",
+      [`orders/${orderId}/paymentId`]: paymentId,
+
       [`users/${uid}/transactions/${orderId}`]: {
         type: "deposit",
         amount,
@@ -1584,9 +1571,12 @@ app.post("/create-payment", verifyFirebaseToken, async (req, res) => {
         order_id: orderId,
         order_amount: amount,
         order_currency: "INR",
+        order_meta: {
+          return_url: "https://c.am4n-builds.workers.dev/wallet.html"
+        },
         customer_details: {
           customer_id: uid,
-          customer_email: "user@email.com",
+          customer_email: "test@test.com",
           customer_phone: "9999999999"
         }
       })
