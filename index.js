@@ -1559,3 +1559,62 @@ app.post("/cashfree-webhook", async (req, res) => {
     res.status(500).send("error");
   }
 });
+
+
+
+app.post("/create-payment", verifyFirebaseToken, async (req, res) => {
+  try {
+    const uid = req.uid;
+    const amount = Number(req.body.amount);
+
+    if (!amount || amount < 1) {
+      return res.status(400).json({ error: "Invalid amount" });
+    }
+
+    const orderId = "ORD" + Date.now();
+
+    const response = await fetch("https://api.cashfree.com/pg/orders", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-client-id": process.env.CASHFREE_APP_ID,
+        "x-client-secret": process.env.CASHFREE_SECRET_KEY,
+        "x-api-version": "2022-09-01"
+      },
+      body: JSON.stringify({
+        order_id: orderId,
+        order_amount: amount,
+        order_currency: "INR",
+        customer_details: {
+          customer_id: uid,
+          customer_email: "user@email.com",
+          customer_phone: "9999999999"
+        }
+      })
+    });
+
+    const data = await response.json();
+
+    if (!data.payment_session_id) {
+      console.log("Cashfree error:", data);
+      return res.status(500).json({ error: "Payment creation failed" });
+    }
+
+    // store order BEFORE payment
+    await db.ref(`orders/${orderId}`).set({
+      uid,
+      amount,
+      status: "pending",
+      createdAt: Date.now()
+    });
+
+    res.json({
+      order_id: orderId,
+      payment_session_id: data.payment_session_id
+    });
+
+  } catch (err) {
+    console.error("CREATE PAYMENT ERROR:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
