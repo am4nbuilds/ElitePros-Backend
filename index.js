@@ -1482,9 +1482,25 @@ app.get("/verify-token", async (req, res) => {
 });
 
 
+import crypto from "crypto";
+
 app.post("/cashfree-webhook", async (req, res) => {
   try {
-    console.log("WEBHOOK:", req.body);
+    const signature = req.headers["x-webhook-signature"];
+    const body = JSON.stringify(req.body);
+
+    // 🔐 VERIFY SIGNATURE
+    const expectedSignature = crypto
+      .createHmac("sha256", process.env.CASHFREE_WEBHOOK_SECRET)
+      .update(body)
+      .digest("base64");
+
+    if (signature !== expectedSignature) {
+      console.log("❌ Invalid signature");
+      return res.status(400).send("invalid");
+    }
+
+    console.log("✅ Verified webhook:", req.body);
 
     const type = req.body.type;
 
@@ -1493,9 +1509,10 @@ app.post("/cashfree-webhook", async (req, res) => {
     }
 
     const orderId = req.body.data.order.order_id;
-    const amount = req.body.data.order.order_amount;
+    const amount = Number(req.body.data.order.order_amount);
+    const paymentId = req.body.data.payment.cf_payment_id;
 
-    // get order
+    // 🔍 FETCH ORDER
     const snap = await db.ref(`orders/${orderId}`).once("value");
 
     if (!snap.exists()) {
@@ -1504,28 +1521,36 @@ app.post("/cashfree-webhook", async (req, res) => {
 
     const order = snap.val();
 
-    // prevent double credit
+    // 🛑 IDEMPOTENCY CHECK
     if (order.status === "success") {
       return res.send("already processed");
     }
 
     const uid = order.uid;
 
-    // 💰 update wallet safely
+    // 💰 SAFE WALLET UPDATE (ATOMIC)
     await db.ref(`users/${uid}/wallet`).transaction((balance) => {
-      return (Number(balance) || 0) + Number(amount);
+      return (Number(balance) || 0) + amount;
     });
 
-    // update order + transaction
+    // 🧾 UPDATE ORDER + TRANSACTION
     await db.ref().update({
-      [`orders/${orderId}/status`]: "success",
+      [`orders/${orderId}`]: {
+        ...order,
+        status: "success",
+        paymentId,
+        updatedAt: Date.now()
+      },
       [`users/${uid}/transactions/${orderId}`]: {
         type: "deposit",
         amount,
         status: "success",
+        paymentId,
         timestamp: Date.now()
       }
     });
+
+    console.log("💰 Wallet credited:", uid, amount);
 
     res.send("OK");
 
