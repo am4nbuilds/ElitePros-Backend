@@ -1491,10 +1491,13 @@ import crypto from "crypto";
 app.post("/cashfree-webhook", async (req, res) => {
   try {
     const signature = req.headers["x-webhook-signature"];
+    const timestamp = req.headers["x-webhook-timestamp"];
+
+    const signedPayload = timestamp + req.rawBody; // ✅ CRITICAL
 
     const expected = crypto
       .createHmac("sha256", process.env.CASHFREE_SECRET_KEY)
-      .update(req.rawBody) // ✅ raw buffer
+      .update(signedPayload)
       .digest("base64");
 
     console.log("SIGNATURE:", signature);
