@@ -1494,15 +1494,18 @@ app.post("/cashfree-webhook", async (req, res) => {
 
     const expected = crypto
       .createHmac("sha256", process.env.CASHFREE_SECRET_KEY)
-      .update(req.rawBody) // ✅ FIXED
+      .update(req.rawBody) // ✅ raw buffer
       .digest("base64");
+
+    console.log("SIGNATURE:", signature);
+    console.log("EXPECTED :", expected);
 
     if (signature !== expected) {
       console.log("❌ Invalid signature");
       return res.status(400).send("invalid");
     }
 
-    console.log("✅ Webhook verified");
+    console.log("✅ Verified");
 
     const type = req.body.type;
 
