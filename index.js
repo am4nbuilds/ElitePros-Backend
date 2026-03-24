@@ -1480,3 +1480,57 @@ app.get("/verify-token", async (req, res) => {
     res.status(401).json({ error: "Invalid token" });
   }
 });
+
+
+app.post("/cashfree-webhook", async (req, res) => {
+  try {
+    console.log("WEBHOOK:", req.body);
+
+    const type = req.body.type;
+
+    if (type !== "PAYMENT_SUCCESS") {
+      return res.send("ignored");
+    }
+
+    const orderId = req.body.data.order.order_id;
+    const amount = req.body.data.order.order_amount;
+
+    // get order
+    const snap = await db.ref(`orders/${orderId}`).once("value");
+
+    if (!snap.exists()) {
+      return res.send("order not found");
+    }
+
+    const order = snap.val();
+
+    // prevent double credit
+    if (order.status === "success") {
+      return res.send("already processed");
+    }
+
+    const uid = order.uid;
+
+    // 💰 update wallet safely
+    await db.ref(`users/${uid}/wallet`).transaction((balance) => {
+      return (Number(balance) || 0) + Number(amount);
+    });
+
+    // update order + transaction
+    await db.ref().update({
+      [`orders/${orderId}/status`]: "success",
+      [`users/${uid}/transactions/${orderId}`]: {
+        type: "deposit",
+        amount,
+        status: "success",
+        timestamp: Date.now()
+      }
+    });
+
+    res.send("OK");
+
+  } catch (err) {
+    console.error("WEBHOOK ERROR:", err);
+    res.status(500).send("error");
+  }
+});
