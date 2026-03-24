@@ -1490,10 +1490,12 @@ import crypto from "crypto";
 
 app.post("/cashfree-webhook", async (req, res) => {
   try {
+    /* ================= SIGNATURE VERIFY ================= */
+
     const signature = req.headers["x-webhook-signature"];
     const timestamp = req.headers["x-webhook-timestamp"];
 
-    const signedPayload = timestamp + req.rawBody; // ✅ CRITICAL
+    const signedPayload = timestamp + req.rawBody;
 
     const expected = crypto
       .createHmac("sha256", process.env.CASHFREE_SECRET_KEY)
@@ -1508,51 +1510,81 @@ app.post("/cashfree-webhook", async (req, res) => {
       return res.status(400).send("invalid");
     }
 
-    console.log("✅ Verified");
+    console.log("✅ Signature verified");
+
+    /* ================= EVENT FILTER ================= */
 
     const type = req.body.type;
 
     if (type !== "PAYMENT_SUCCESS") {
+      console.log("Ignored event:", type);
       return res.send("ignored");
     }
+
+    /* ================= EXTRACT DATA ================= */
 
     const orderId = req.body.data.order.order_id;
     const amount = Number(req.body.data.order.order_amount);
     const paymentId = req.body.data.payment.cf_payment_id;
 
+    console.log("ORDER ID:", orderId);
+    console.log("AMOUNT:", amount);
+
+    /* ================= FETCH ORDER ================= */
+
     const snap = await db.ref(`orders/${orderId}`).once("value");
 
-    if (!snap.exists()) return res.send("order not found");
+    console.log("ORDER EXISTS:", snap.exists());
+
+    if (!snap.exists()) {
+      console.log("❌ Order not found in DB");
+      return res.send("order not found");
+    }
 
     const order = snap.val();
-
-    if (order.status === "success") return res.send("already");
-
     const uid = order.uid;
 
-    // ✅ FIXED WALLET UPDATE
+    console.log("UID:", uid);
+
+    /* ================= DOUBLE CREDIT PROTECTION ================= */
+
+    if (order.status === "success") {
+      console.log("⚠️ Already credited");
+      return res.send("already");
+    }
+
+    /* ================= WALLET UPDATE (FIXED) ================= */
+
     await db.ref(`users/${uid}/wallet/deposited`)
       .transaction(v => (Number(v) || 0) + amount);
 
-    await db.ref().update({
-      [`orders/${orderId}/status`]: "success",
-      [`orders/${orderId}/paymentId`]: paymentId,
+    /* ================= SAVE TRANSACTION ================= */
 
-      [`users/${uid}/transactions/${orderId}`]: {
-        type: "deposit",
-        amount,
-        status: "success",
-        paymentId,
-        timestamp: Date.now()
-      }
+    await db.ref(`users/${uid}/transactions/${orderId}`).set({
+      transactionId: orderId,
+      type: "deposit",
+      amount,
+      status: "success",
+      paymentId,
+      timestamp: Date.now()
     });
 
-    console.log("💰 Wallet credited:", uid, amount);
+    /* ================= UPDATE ORDER ================= */
+
+    await db.ref(`orders/${orderId}`).update({
+      status: "success",
+      paymentId,
+      updatedAt: Date.now()
+    });
+
+    console.log("💰 Wallet credited successfully");
+
+    /* ================= RESPONSE ================= */
 
     res.send("OK");
 
   } catch (err) {
-    console.error("WEBHOOK ERROR:", err);
+    console.error("❌ WEBHOOK ERROR:", err);
     res.status(500).send("error");
   }
 });
