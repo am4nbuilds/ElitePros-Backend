@@ -1489,18 +1489,18 @@ app.post("/cashfree-webhook", async (req, res) => {
     const signature = req.headers["x-webhook-signature"];
     const body = JSON.stringify(req.body);
 
-    // 🔐 VERIFY SIGNATURE
-    const expectedSignature = crypto
-      .createHmac("sha256", process.env.CASHFREE_WEBHOOK_SECRET)
+    // 🔐 VERIFY SIGNATURE USING CASHFREE SECRET KEY
+    const expected = crypto
+      .createHmac("sha256", process.env.CASHFREE_SECRET_KEY)
       .update(body)
       .digest("base64");
 
-    if (signature !== expectedSignature) {
+    if (signature !== expected) {
       console.log("❌ Invalid signature");
       return res.status(400).send("invalid");
     }
 
-    console.log("✅ Verified webhook:", req.body);
+    console.log("✅ Webhook verified");
 
     const type = req.body.type;
 
@@ -1512,7 +1512,7 @@ app.post("/cashfree-webhook", async (req, res) => {
     const amount = Number(req.body.data.order.order_amount);
     const paymentId = req.body.data.payment.cf_payment_id;
 
-    // 🔍 FETCH ORDER
+    // 🔍 get order
     const snap = await db.ref(`orders/${orderId}`).once("value");
 
     if (!snap.exists()) {
@@ -1521,19 +1521,19 @@ app.post("/cashfree-webhook", async (req, res) => {
 
     const order = snap.val();
 
-    // 🛑 IDEMPOTENCY CHECK
+    // 🛑 prevent double credit
     if (order.status === "success") {
       return res.send("already processed");
     }
 
     const uid = order.uid;
 
-    // 💰 SAFE WALLET UPDATE (ATOMIC)
+    // 💰 atomic wallet update
     await db.ref(`users/${uid}/wallet`).transaction((balance) => {
       return (Number(balance) || 0) + amount;
     });
 
-    // 🧾 UPDATE ORDER + TRANSACTION
+    // 🧾 update order + transaction
     await db.ref().update({
       [`orders/${orderId}`]: {
         ...order,
@@ -1559,7 +1559,6 @@ app.post("/cashfree-webhook", async (req, res) => {
     res.status(500).send("error");
   }
 });
-
 
 
 app.post("/create-payment", verifyFirebaseToken, async (req, res) => {
