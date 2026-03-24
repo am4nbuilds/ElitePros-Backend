@@ -1516,10 +1516,10 @@ app.post("/cashfree-webhook", async (req, res) => {
 
     const type = req.body.type;
 
-    if (type !== "PAYMENT_SUCCESS") {
-      console.log("Ignored event:", type);
-      return res.send("ignored");
-    }
+    if (!type.includes("PAYMENT_SUCCESS")) {
+  console.log("Ignored event:", type);
+  return res.send("ignored");
+}
 
     /* ================= EXTRACT DATA ================= */
 
