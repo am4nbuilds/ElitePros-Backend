@@ -50,7 +50,11 @@ credentials:true
 
 app.options("*",cors());
 
-app.use(express.json());
+app.use(express.json({
+  verify: (req, res, buf) => {
+    req.rawBody = buf.toString();
+  }
+}));
 app.use(express.urlencoded({extended:true}));
 app.use("/create-payment-test", createPaymentRoute);
 /* ================= FIREBASE ================= */
