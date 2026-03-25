@@ -1652,16 +1652,30 @@ app.post("/create-payment", verifyFirebaseToken, async (req, res) => {
 
 app.get("/match-details", verifyFirebaseToken, async (req, res) => {
   try {
-    const { matchId, status } = req.query;
+    let { matchId, status } = req.query;
 
     if (!matchId || !status) {
       return res.status(400).json({ error: "matchId & status required" });
     }
 
-    const snap = await db.ref(`matches/${status}/${matchId}`).once("value");
+    let snap = await db.ref(`matches/${status}/${matchId}`).once("value");
+
+    // 🔥 fallback if wrong status
+    if (!snap.exists()) {
+      const paths = ["upcoming", "ongoing", "completed"];
+
+      for (const p of paths) {
+        const testSnap = await db.ref(`matches/${p}/${matchId}`).once("value");
+        if (testSnap.exists()) {
+          snap = testSnap;
+          status = p; // correct it
+          break;
+        }
+      }
+    }
 
     if (!snap.exists()) {
-      return res.status(404).json({ error: "Match not found" });
+      return res.status(404).json({ error: "Match not found anywhere" });
     }
 
     const match = snap.val();
@@ -1676,8 +1690,6 @@ app.get("/match-details", verifyFirebaseToken, async (req, res) => {
     res.json({
       status,
       id: matchId,
-
-      // 🔥 EVERYTHING INSIDE matchDetails
       matchDetails: {
         matchId: d.matchId || matchId,
         banner: d.banner || "",
@@ -1691,7 +1703,6 @@ app.get("/match-details", verifyFirebaseToken, async (req, res) => {
         matchSettings: d.matchSettings || "",
         prizeDistribution: d.prizeDistribution || ""
       },
-
       participants
     });
 
