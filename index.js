@@ -1652,29 +1652,19 @@ app.post("/create-payment", verifyFirebaseToken, async (req, res) => {
 
 app.get("/match-details", verifyFirebaseToken, async (req, res) => {
   try {
-    const { matchId } = req.query;
+    const { matchId, status } = req.query;
 
-    if (!matchId) {
-      return res.status(400).json({ error: "matchId required" });
+    if (!matchId || !status) {
+      return res.status(400).json({ error: "matchId & status required" });
     }
 
-    const statuses = ["upcoming", "ongoing", "completed"];
-    let match = null;
-    let statusFound = null;
+    const snap = await db.ref(`matches/${status}/${matchId}`).once("value");
 
-    for (const status of statuses) {
-      const snap = await db.ref(`matches/${status}/${matchId}`).once("value");
-      if (snap.exists()) {
-        match = snap.val();
-        statusFound = status;
-        break;
-      }
-    }
-
-    if (!match) {
+    if (!snap.exists()) {
       return res.status(404).json({ error: "Match not found" });
     }
 
+    const match = snap.val();
     const d = match.matchDetails || {};
     const players = match.players || {};
 
@@ -1684,13 +1674,15 @@ app.get("/match-details", verifyFirebaseToken, async (req, res) => {
     }));
 
     res.json({
-      status: statusFound,
+      status,
       id: matchId,
 
-      banner: match.banner || "",
-      prizePool: match.prizePool || 0,
-      perKill: match.perKill || 0,
-      entryFee: match.entryFee || 0,
+      banner: d.banner || "",
+      prizePool: d.prizePool || 0,
+      perKill: d.perKill || 0,
+      entryFee: d.entryFee || 0,
+      type: d.type || "solo",
+      map: d.map || "N/A",
 
       matchDetails: {
         matchId: d.matchId || matchId,
