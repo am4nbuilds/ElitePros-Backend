@@ -1677,15 +1677,16 @@ app.get("/match-details", verifyFirebaseToken, async (req, res) => {
       status,
       id: matchId,
 
-      banner: d.banner || "",
-      prizePool: d.prizePool || 0,
-      perKill: d.perKill || 0,
-      entryFee: d.entryFee || 0,
-      type: d.type || "solo",
-      map: d.map || "N/A",
-
+      // 🔥 EVERYTHING INSIDE matchDetails
       matchDetails: {
         matchId: d.matchId || matchId,
+        banner: d.banner || "",
+        prizePool: d.prizePool || 0,
+        perKill: d.perKill || 0,
+        entryFee: d.entryFee || 0,
+        type: d.type || "solo",
+        map: d.map || "N/A",
+        platform: d.platform || "Phone",
         rules: d.rules || "",
         matchSettings: d.matchSettings || "",
         prizeDistribution: d.prizeDistribution || ""
@@ -1703,33 +1704,31 @@ app.get("/match-details", verifyFirebaseToken, async (req, res) => {
 
 app.get("/room-credentials", verifyFirebaseToken, async (req, res) => {
   try {
-    const { matchId } = req.query;
+    const { matchId, status } = req.query;
     const uid = req.uid;
 
-    if (!matchId) {
-      return res.status(400).json({ error: "matchId required" });
+    if (!matchId || !status) {
+      return res.status(400).json({ error: "matchId & status required" });
     }
 
-    /* 🔴 CHECK USER JOINED */
-    const joinedSnap = await db
-      .ref(`matches/upcoming/${matchId}/players/${uid}`)
-      .once("value");
-
-    const ongoingSnap = await db
-      .ref(`matches/ongoing/${matchId}/players/${uid}`)
-      .once("value");
-
-    if (!joinedSnap.exists() && !ongoingSnap.exists()) {
-      return res.status(403).json({ error: "Not joined" });
+    if (status !== "ongoing") {
+      return res.status(400).json({ error: "Match not live" });
     }
 
-    /* 🔴 GET MATCH ONLY FROM ONGOING */
     const matchSnap = await db
-      .ref(`matches/ongoing/${matchId}`)
+      .ref(`matches/${status}/${matchId}`)
       .once("value");
 
     if (!matchSnap.exists()) {
-      return res.status(400).json({ error: "Match not live yet" });
+      return res.status(404).json({ error: "Match not found" });
+    }
+
+    const playerSnap = await db
+      .ref(`matches/${status}/${matchId}/players/${uid}`)
+      .once("value");
+
+    if (!playerSnap.exists()) {
+      return res.status(403).json({ error: "Not joined" });
     }
 
     const d = matchSnap.val().matchDetails || {};
@@ -1740,7 +1739,7 @@ app.get("/room-credentials", verifyFirebaseToken, async (req, res) => {
     });
 
   } catch (err) {
-    console.error("ROOM ERROR:", err);
+    console.error(err);
     res.status(500).json({ error: "server error" });
   }
 });
