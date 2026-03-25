@@ -1649,3 +1649,106 @@ app.post("/create-payment", verifyFirebaseToken, async (req, res) => {
     res.status(500).json({ error: "Server error" });
   }
 });
+
+app.get("/match-details", verifyFirebaseToken, async (req, res) => {
+  try {
+    const { matchId } = req.query;
+
+    if (!matchId) {
+      return res.status(400).json({ error: "matchId required" });
+    }
+
+    const statuses = ["upcoming", "ongoing", "completed"];
+    let match = null;
+    let statusFound = null;
+
+    for (const status of statuses) {
+      const snap = await db.ref(`matches/${status}/${matchId}`).once("value");
+      if (snap.exists()) {
+        match = snap.val();
+        statusFound = status;
+        break;
+      }
+    }
+
+    if (!match) {
+      return res.status(404).json({ error: "Match not found" });
+    }
+
+    const d = match.matchDetails || {};
+    const players = match.players || {};
+
+    const participants = Object.entries(players).map(([uid, p]) => ({
+      uid,
+      ign: p.ign || "Unknown"
+    }));
+
+    res.json({
+      status: statusFound,
+      id: matchId,
+
+      banner: match.banner || "",
+      prizePool: match.prizePool || 0,
+      perKill: match.perKill || 0,
+      entryFee: match.entryFee || 0,
+
+      matchDetails: {
+        matchId: d.matchId || matchId,
+        rules: d.rules || "",
+        matchSettings: d.matchSettings || "",
+        prizeDistribution: d.prizeDistribution || ""
+      },
+
+      participants
+    });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "server error" });
+  }
+});
+
+
+app.get("/room-credentials", verifyFirebaseToken, async (req, res) => {
+  try {
+    const { matchId } = req.query;
+    const uid = req.uid;
+
+    if (!matchId) {
+      return res.status(400).json({ error: "matchId required" });
+    }
+
+    /* 🔴 CHECK USER JOINED */
+    const joinedSnap = await db
+      .ref(`matches/upcoming/${matchId}/players/${uid}`)
+      .once("value");
+
+    const ongoingSnap = await db
+      .ref(`matches/ongoing/${matchId}/players/${uid}`)
+      .once("value");
+
+    if (!joinedSnap.exists() && !ongoingSnap.exists()) {
+      return res.status(403).json({ error: "Not joined" });
+    }
+
+    /* 🔴 GET MATCH ONLY FROM ONGOING */
+    const matchSnap = await db
+      .ref(`matches/ongoing/${matchId}`)
+      .once("value");
+
+    if (!matchSnap.exists()) {
+      return res.status(400).json({ error: "Match not live yet" });
+    }
+
+    const d = matchSnap.val().matchDetails || {};
+
+    res.json({
+      roomId: d.roomId || "",
+      password: d.password || ""
+    });
+
+  } catch (err) {
+    console.error("ROOM ERROR:", err);
+    res.status(500).json({ error: "server error" });
+  }
+});
