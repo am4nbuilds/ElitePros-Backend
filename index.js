@@ -1754,3 +1754,72 @@ app.get("/room-credentials", verifyFirebaseToken, async (req, res) => {
     res.status(500).json({ error: "server error" });
   }
 });
+
+// 🔥 GET MATCH RESULTS (COMPLETED ONLY)
+// Route: /match-results
+// Query: matchId, status=completed
+// Auth: Required (Firebase token)
+
+app.get("/match-results", verifyFirebaseToken, async (req, res) => {
+  try {
+    const { matchId, status } = req.query;
+
+    // ❌ validation
+    if (!matchId || !status) {
+      return res.status(400).json({ error: "matchId & status required" });
+    }
+
+    if (status !== "completed") {
+      return res.status(400).json({ error: "Only completed matches allowed" });
+    }
+
+    // ✅ fetch match
+    const snap = await db.ref(`matches/completed/${matchId}`).once("value");
+
+    if (!snap.exists()) {
+      return res.status(404).json({ error: "Match not found" });
+    }
+
+    const match = snap.val();
+    const d = match.matchDetails || {};
+    const r = match.results || {};
+    const players = match.players || {};
+
+    // ✅ sanitize
+    const placements = r.placements || {};
+    const kills = r.kills || {};
+    const rankPrizes = r.rankPrizes || {};
+    const totalWinnings = r.totalWinnings || {};
+    const matchNotes = String(r.matchNotes || "");
+
+    res.json({
+      status: "completed",
+      id: matchId,
+
+      matchDetails: {
+        matchId: String(d.matchId || matchId),
+        banner: String(d.banner || ""),
+        prizePool: Number(d.prizePool || 0),
+        perKill: Number(d.perKill || 0),
+        entryFee: Number(d.entryFee || 0),
+        type: String(d.type || "solo"),
+        map: String(d.map || "N/A"),
+        platform: String(d.platform || "Phone")
+      },
+
+      results: {
+        placements,
+        kills,
+        rankPrizes,
+        totalWinnings,
+        matchNotes
+      },
+
+      players
+    });
+
+  } catch (err) {
+    console.error("MATCH RESULTS ERROR:", err);
+    res.status(500).json({ error: "server error" });
+  }
+});
