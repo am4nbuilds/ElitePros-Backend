@@ -350,25 +350,9 @@ res.status(500).send("Error");
 });
 
 
-
 /* ======================================================
 JOIN MATCH (STABLE BALANCE + RACE SAFE SLOT)
 ====================================================== */
-
-  // 🔥 JOIN MATCH (FULLY RACE-SAFE + ATOMIC + AUTO joinedCount)
-// Route: POST /join-match
-// Auth: Required (Firebase token)
-// Body: { matchId, ign }
-//
-// What this fixes:
-// ✔ Wallet + slot handled in ONE transaction (no double deduction)
-// ✔ Prevents duplicate joins
-// ✔ Prevents slot overflow
-// ✔ Updates joinedCount atomically
-// ✔ Writes player, wallet, myMatches, transactions together
-//
-// NOTE:
-// This uses ROOT transaction → slower than partial updates but 100% safe
 
 app.post("/join-match", verifyFirebaseToken, async (req, res) => {
   try {
@@ -379,45 +363,60 @@ app.post("/join-match", verifyFirebaseToken, async (req, res) => {
       return res.json({ error: "INVALID_DATA" });
     }
 
-    const rootRef = db.ref();
+    let errorCode = null;
 
-    const txn = await rootRef.transaction((root) => {
+    const txn = await db.ref().transaction((root) => {
       if (!root) return root;
 
       const match = root.matches?.upcoming?.[matchId];
       const user = root.users?.[uid];
 
-      if (!match) return; // MATCH_NOT_FOUND
+      /* ======================================================
+      VALIDATIONS
+      ====================================================== */
+
+      if (!match) {
+        errorCode = "MATCH_NOT_FOUND";
+        return; // 🔴 abort
+      }
+
+      if (!user) {
+        errorCode = "USER_NOT_FOUND";
+        return;
+      }
 
       if (!match.players) match.players = {};
-      if (!user) return;
 
-      // 🔴 Already joined
       if (match.players[uid]) {
-        root.__error = "ALREADY_JOINED";
-        return root;
+        errorCode = "ALREADY_JOINED";
+        return;
       }
 
       const slots = Number(match.slots || 100);
       const count = Object.keys(match.players).length;
 
-      // 🔴 Match full
       if (count >= slots) {
-        root.__error = "MATCH_FULL";
-        return root;
+        errorCode = "MATCH_FULL";
+        return; // 🔴 critical abort
       }
 
-      // 🔴 Wallet
+      /* ======================================================
+      WALLET CHECK
+      ====================================================== */
+
       let dep = Number(user.wallet?.deposited || 0);
       let win = Number(user.wallet?.winnings || 0);
       const entryFee = Number(match.matchDetails?.entryFee || 0);
 
       if (dep + win < entryFee) {
-        root.__error = "INSUFFICIENT_BALANCE";
-        return root;
+        errorCode = "INSUFFICIENT_BALANCE";
+        return;
       }
 
-      // 🔥 Deduction logic
+      /* ======================================================
+      DEDUCTION LOGIC
+      ====================================================== */
+
       let depositUsed = 0;
       let winningsUsed = 0;
 
@@ -431,12 +430,16 @@ app.post("/join-match", verifyFirebaseToken, async (req, res) => {
         win -= winningsUsed;
       }
 
-      // 🔥 Update wallet
+      /* ======================================================
+      APPLY UPDATES (ATOMIC)
+      ====================================================== */
+
+      // wallet update
       if (!root.users[uid].wallet) root.users[uid].wallet = {};
       root.users[uid].wallet.deposited = dep;
       root.users[uid].wallet.winnings = win;
 
-      // 🔥 Add player (FINAL state, no temp lock)
+      // add player
       match.players[uid] = {
         ign,
         depositUsed,
@@ -444,19 +447,19 @@ app.post("/join-match", verifyFirebaseToken, async (req, res) => {
         joinedAt: Date.now()
       };
 
-      // 🔥 Increase joinedCount safely
+      // joined count
       match.joinedCount = (match.joinedCount || 0) + 1;
 
-      // 🔥 myMatches
+      // myMatches
       if (!root.users[uid].myMatches) root.users[uid].myMatches = {};
       root.users[uid].myMatches[matchId] = {
         joinedAt: Date.now()
       };
 
-      // 🔥 Save IGN globally (optional)
+      // save IGN globally
       root.users[uid].ign = ign;
 
-      // 🔥 Transaction log
+      // transaction log
       const publicMatchId = match.matchDetails?.matchId || matchId;
 
       if (!root.users[uid].transactions) root.users[uid].transactions = {};
@@ -469,17 +472,15 @@ app.post("/join-match", verifyFirebaseToken, async (req, res) => {
         timestamp: Date.now()
       };
 
-      return root;
+      return root; // ✅ commit
     });
 
-    // 🔴 Transaction failed (conflict / retry exhausted)
-    if (!txn.committed) {
-      return res.json({ error: "JOIN_FAILED" });
-    }
+    /* ======================================================
+    FINAL RESPONSE
+    ====================================================== */
 
-    // 🔴 Custom error returned from transaction
-    if (txn.snapshot.val()?.__error) {
-      return res.json({ error: txn.snapshot.val().__error });
+    if (!txn.committed) {
+      return res.json({ error: errorCode || "JOIN_FAILED" });
     }
 
     return res.json({ status: "SUCCESS" });
@@ -490,6 +491,7 @@ app.post("/join-match", verifyFirebaseToken, async (req, res) => {
   }
 });
 
+      
 /* ======================================================
 ADMIN UPDATE MATCH
 ====================================================== */
