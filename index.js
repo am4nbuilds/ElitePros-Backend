@@ -454,46 +454,142 @@ winnings:win
 });
 
 /* ======================================================
-STEP 5 — FINAL SAVE
+JOIN MATCH (STABLE BALANCE + RACE SAFE SLOT)
 ====================================================== */
 
-const publicMatchId = matchData.matchId || matchId;
+  // 🔥 JOIN MATCH (FULLY RACE-SAFE + ATOMIC + AUTO joinedCount)
+// Route: POST /join-match
+// Auth: Required (Firebase token)
+// Body: { matchId, ign }
+//
+// What this fixes:
+// ✔ Wallet + slot handled in ONE transaction (no double deduction)
+// ✔ Prevents duplicate joins
+// ✔ Prevents slot overflow
+// ✔ Updates joinedCount atomically
+// ✔ Writes player, wallet, myMatches, transactions together
+//
+// NOTE:
+// This uses ROOT transaction → slower than partial updates but 100% safe
 
-await db.ref().update({
+app.post("/join-match", verifyFirebaseToken, async (req, res) => {
+  try {
+    const uid = req.uid;
+    const { matchId, ign } = req.body;
 
-[`matches/upcoming/${matchId}/players/${uid}`]:{
-ign,
-depositUsed,
-winningsUsed,
-joinedAt:Date.now()
-},
+    if (!matchId || !ign) {
+      return res.json({ error: "INVALID_DATA" });
+    }
 
-[`users/${uid}/myMatches/${matchId}`]:{
-joinedAt:Date.now()
-},
+    const rootRef = db.ref();
 
-[`users/${uid}/ign`]:ign,
+    const txn = await rootRef.transaction((root) => {
+      if (!root) return root;
 
-[`users/${uid}/transactions/${publicMatchId}_Join`]:{
-transactionId:`${publicMatchId}_Join`,
-type:"entry",
-amount:-entryFee,
-status:"success",
-reason:"Match Joined",
-timestamp:Date.now()
-}
+      const match = root.matches?.upcoming?.[matchId];
+      const user = root.users?.[uid];
 
-});
+      if (!match) return; // MATCH_NOT_FOUND
 
-res.json({status:"SUCCESS"});
+      if (!match.players) match.players = {};
+      if (!user) return;
 
-}catch(err){
+      // 🔴 Already joined
+      if (match.players[uid]) {
+        root.__error = "ALREADY_JOINED";
+        return root;
+      }
 
-console.error("JOIN ERROR:",err);
-res.status(500).json({error:"SERVER_ERROR"});
+      const slots = Number(match.slots || 100);
+      const count = Object.keys(match.players).length;
 
-}
+      // 🔴 Match full
+      if (count >= slots) {
+        root.__error = "MATCH_FULL";
+        return root;
+      }
 
+      // 🔴 Wallet
+      let dep = Number(user.wallet?.deposited || 0);
+      let win = Number(user.wallet?.winnings || 0);
+      const entryFee = Number(match.matchDetails?.entryFee || 0);
+
+      if (dep + win < entryFee) {
+        root.__error = "INSUFFICIENT_BALANCE";
+        return root;
+      }
+
+      // 🔥 Deduction logic
+      let depositUsed = 0;
+      let winningsUsed = 0;
+
+      if (dep >= entryFee) {
+        depositUsed = entryFee;
+        dep -= entryFee;
+      } else {
+        depositUsed = dep;
+        winningsUsed = entryFee - dep;
+        dep = 0;
+        win -= winningsUsed;
+      }
+
+      // 🔥 Update wallet
+      if (!root.users[uid].wallet) root.users[uid].wallet = {};
+      root.users[uid].wallet.deposited = dep;
+      root.users[uid].wallet.winnings = win;
+
+      // 🔥 Add player (FINAL state, no temp lock)
+      match.players[uid] = {
+        ign,
+        depositUsed,
+        winningsUsed,
+        joinedAt: Date.now()
+      };
+
+      // 🔥 Increase joinedCount safely
+      match.joinedCount = (match.joinedCount || 0) + 1;
+
+      // 🔥 myMatches
+      if (!root.users[uid].myMatches) root.users[uid].myMatches = {};
+      root.users[uid].myMatches[matchId] = {
+        joinedAt: Date.now()
+      };
+
+      // 🔥 Save IGN globally (optional)
+      root.users[uid].ign = ign;
+
+      // 🔥 Transaction log
+      const publicMatchId = match.matchDetails?.matchId || matchId;
+
+      if (!root.users[uid].transactions) root.users[uid].transactions = {};
+      root.users[uid].transactions[`${publicMatchId}_Join`] = {
+        transactionId: `${publicMatchId}_Join`,
+        type: "entry",
+        amount: -entryFee,
+        status: "success",
+        reason: "Match Joined",
+        timestamp: Date.now()
+      };
+
+      return root;
+    });
+
+    // 🔴 Transaction failed (conflict / retry exhausted)
+    if (!txn.committed) {
+      return res.json({ error: "JOIN_FAILED" });
+    }
+
+    // 🔴 Custom error returned from transaction
+    if (txn.snapshot.val()?.__error) {
+      return res.json({ error: txn.snapshot.val().__error });
+    }
+
+    return res.json({ status: "SUCCESS" });
+
+  } catch (err) {
+    console.error("JOIN ERROR:", err);
+    res.status(500).json({ error: "SERVER_ERROR" });
+  }
 });
 
 /* ======================================================
