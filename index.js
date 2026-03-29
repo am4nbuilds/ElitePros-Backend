@@ -354,7 +354,7 @@ res.status(500).send("Error");
 JOIN MATCH (STABLE BALANCE + RACE SAFE SLOT)
 ====================================================== */
 
-app.post("/join-match", verifyFirebaseToken, async (req, res) => {
+app.post("/join-matchh", verifyFirebaseToken, async (req, res) => {
   try {
     const uid = req.uid;
     const { matchId, ign } = req.body;
