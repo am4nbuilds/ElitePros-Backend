@@ -438,50 +438,98 @@ app.post("/join-match", verifyFirebaseToken, async (req, res) => {
       if (!root.users[uid].wallet) root.users[uid].wallet = {};
       root.users[uid].wallet.deposited = dep;
       root.users[uid].wallet.winnings = win;
+app.post("/join-match", verifyFirebaseToken, async (req, res) => {
+  try {
+    const uid = req.uid;
+    const { matchId, ign } = req.body;
 
-      // add player
+    if (!matchId || !ign) return res.json({ error: "INVALID_DATA" });
+
+    // 1. First, get the User Data once (outside the match transaction)
+    const userSnap = await db.ref(`users/${uid}`).once("value");
+    const user = userSnap.val();
+    if (!user) return res.json({ error: "USER_NOT_FOUND" });
+
+    let errorCode = null;
+    let resultData = null;
+
+    // 2. RUN TRANSACTION ONLY ON THE SPECIFIC MATCH
+    // This locks only this match's player list for the millisecond of the update
+    const matchRef = db.ref(`matches/upcoming/${matchId}`);
+    
+    const txn = await matchRef.transaction((match) => {
+      if (!match) {
+        errorCode = "MATCH_NOT_FOUND";
+        return; 
+      }
+
+      // Check slots inside the lock
+      const currentPlayers = match.players || {};
+      const playerCount = Object.keys(currentPlayers).length;
+      const totalSlots = Number(match.slots || 100);
+
+      if (playerCount >= totalSlots) {
+        errorCode = "MATCH_FULL";
+        return; // 🔴 Aborts if someone beat them to the last slot
+      }
+
+      if (currentPlayers[uid]) {
+        errorCode = "ALREADY_JOINED";
+        return;
+      }
+
+      // 3. Wallet Check (Using the user snapshot we got earlier)
+      let dep = Number(user.wallet?.deposited || 0);
+      let win = Number(user.wallet?.winnings || 0);
+      const entryFee = Number(match.matchDetails?.entryFee || 0);
+
+      if (dep + win < entryFee) {
+        errorCode = "INSUFFICIENT_BALANCE";
+        return;
+      }
+
+      // Calculate deduction
+      let depositUsed = 0, winningsUsed = 0;
+      if (dep >= entryFee) { depositUsed = entryFee; } 
+      else { depositUsed = dep; winningsUsed = entryFee - dep; }
+
+      // 4. Update the Match Object (This is atomic)
+      if (!match.players) match.players = {};
       match.players[uid] = {
         ign,
         depositUsed,
         winningsUsed,
         joinedAt: Date.now()
       };
-
-      // joined count
       match.joinedCount = (match.joinedCount || 0) + 1;
 
-      // myMatches
-      if (!root.users[uid].myMatches) root.users[uid].myMatches = {};
-      root.users[uid].myMatches[matchId] = {
-        joinedAt: Date.now()
-      };
+      resultData = { entryFee, depositUsed, winningsUsed, publicId: match.matchDetails?.matchId || matchId };
+      return match; 
+    });
 
-      // save IGN globally
-      root.users[uid].ign = ign;
+    if (!txn.committed) {
+      return res.json({ error: errorCode || "JOIN_FAILED" });
+    }
 
-      // transaction log
-      const publicMatchId = match.matchDetails?.matchId || matchId;
-
-      if (!root.users[uid].transactions) root.users[uid].transactions = {};
-      root.users[uid].transactions[`${publicMatchId}_Join`] = {
-        transactionId: `${publicMatchId}_Join`,
+    // 5. AFTER match is secured, update the User's wallet and history
+    // Since the match is already "locked in", we can use standard updates here
+    const { entryFee, depositUsed, winningsUsed, publicId } = resultData;
+    
+    const updates = {};
+    updates[`users/${uid}/wallet/deposited`] = Number(user.wallet?.deposited || 0) - depositUsed;
+    updates[`users/${uid}/wallet/winnings`] = Number(user.wallet?.winnings || 0) - winningsUsed;
+    updates[`users/${uid}/myMatches/${matchId}`] = { joinedAt: Date.now() };
+    updates[`users/${uid}/ign`] = ign;
+    updates[`users/${uid}/transactions/${publicId}_Join`] = {
+        transactionId: `${publicId}_Join`,
         type: "entry",
         amount: -entryFee,
         status: "success",
         reason: "Match Joined",
         timestamp: Date.now()
-      };
+    };
 
-      return root; // ✅ commit
-    });
-
-    /* ======================================================
-    FINAL RESPONSE
-    ====================================================== */
-
-    if (!txn.committed) {
-      return res.json({ error: errorCode || "JOIN_FAILED" });
-    }
+    await db.ref().update(updates);
 
     return res.json({ status: "SUCCESS" });
 
@@ -490,6 +538,7 @@ app.post("/join-match", verifyFirebaseToken, async (req, res) => {
     res.status(500).json({ error: "SERVER_ERROR" });
   }
 });
+
 
       
 /* ======================================================
