@@ -350,63 +350,149 @@ res.status(500).send("Error");
 });
 
 
-/* ======================================================
-JOIN MATCH (STABLE BALANCE + RACE SAFE SLOT)
+
+  /* ======================================================
+JOIN MATCH (RACE CONDITION SAFE)
 ====================================================== */
 
-app.post("/join-matchh", verifyFirebaseToken, async (req, res) => {
+app.post("/join-match", verifyFirebaseToken, async (req, res) => {
   try {
     const uid = req.uid;
     const { matchId, ign } = req.body;
 
-    // 1. Point to the EXACT match location
-    const matchRef = db.ref(`matches/upcoming/${matchId}`);
+    if (!matchId || !ign) {
+      return res.json({ error: "INVALID_DATA" });
+    }
 
-    let errorCode = null;
-    let matchDataForUserUpdate = null;
+    let finalError = null;
+    let committed = false;
 
-    const txn = await matchRef.transaction((currentMatch) => {
-      // If the path is wrong or ID doesn't exist, currentMatch is null
-      if (currentMatch === null) {
-        errorCode = "MATCH_NOT_FOUND"; 
-        return; 
+    const txn = await db.ref().transaction((root) => {
+      if (!root) return root;
+
+      const match = root.matches?.upcoming?.[matchId];
+      const user = root.users?.[uid];
+
+      /* ======================================================
+      VALIDATIONS (All must be inside transaction)
+      ====================================================== */
+
+      if (!match) {
+        finalError = "MATCH_NOT_FOUND";
+        return; // 🔴 abort
       }
 
-      // 2. Critical Slot Check
-      const players = currentMatch.players || {};
-      const joinedCount = Object.keys(players).length;
-      const totalSlots = Number(currentMatch.slots || 100);
-
-      if (joinedCount >= totalSlots) {
-        errorCode = "MATCH_FULL";
-        return; // Aborts the join
-      }
-
-      if (players[uid]) {
-        errorCode = "ALREADY_JOINED";
+      if (!user) {
+        finalError = "USER_NOT_FOUND";
         return;
       }
 
-      // 3. Prepare data for the successful join
-      if (!currentMatch.players) currentMatch.players = {};
-      currentMatch.players[uid] = { ign, joinedAt: Date.now() };
-      currentMatch.joinedCount = joinedCount + 1;
+      // Initialize players object if needed
+      if (!match.players) match.players = {};
 
-      matchDataForUserUpdate = {
-        entryFee: Number(currentMatch.matchDetails?.entryFee || 0),
-        publicId: currentMatch.matchDetails?.matchId || matchId
+      // Check if already joined
+      if (match.players[uid]) {
+        finalError = "ALREADY_JOINED";
+        return;
+      }
+
+      const slots = Number(match.slots || 100);
+      const currentPlayers = Object.keys(match.players).length;
+
+      // CRITICAL: Check capacity BEFORE any modifications
+      if (currentPlayers >= slots) {
+        finalError = "MATCH_FULL";
+        return; // 🔴 critical abort - race condition protected
+      }
+
+      /* ======================================================
+      WALLET CHECK (Must use current values)
+      ====================================================== */
+
+      let dep = Number(user.wallet?.deposited || 0);
+      let win = Number(user.wallet?.winnings || 0);
+      const entryFee = Number(match.matchDetails?.entryFee || 0);
+
+      if (dep + win < entryFee) {
+        finalError = "INSUFFICIENT_BALANCE";
+        return;
+      }
+
+      /* ======================================================
+      DEDUCTION LOGIC
+      ====================================================== */
+
+      let depositUsed = 0;
+      let winningsUsed = 0;
+
+      if (dep >= entryFee) {
+        depositUsed = entryFee;
+        dep -= entryFee;
+      } else {
+        depositUsed = dep;
+        winningsUsed = entryFee - dep;
+        dep = 0;
+        win -= winningsUsed;
+      }
+
+      /* ======================================================
+      APPLY UPDATES (ATOMIC)
+      ====================================================== */
+
+      // wallet update
+      if (!root.users[uid].wallet) root.users[uid].wallet = {};
+      root.users[uid].wallet.deposited = dep;
+      root.users[uid].wallet.winnings = win;
+
+      // add player
+      match.players[uid] = {
+        ign,
+        depositUsed,
+        winningsUsed,
+        joinedAt: Date.now()
       };
 
-      return currentMatch; // Commit the slot
+      // joined count - use current players + 1 for accuracy
+      match.joinedCount = currentPlayers + 1;
+
+      // myMatches
+      if (!root.users[uid].myMatches) root.users[uid].myMatches = {};
+      root.users[uid].myMatches[matchId] = {
+        joinedAt: Date.now()
+      };
+
+      // save IGN globally
+      root.users[uid].ign = ign;
+
+      // transaction log
+      const publicMatchId = match.matchDetails?.matchId || matchId;
+
+      if (!root.users[uid].transactions) root.users[uid].transactions = {};
+      root.users[uid].transactions[`${publicMatchId}_${uid}_${Date.now()}`] = {
+        transactionId: `${publicMatchId}_Join`,
+        type: "entry",
+        amount: -entryFee,
+        status: "success",
+        reason: "Match Joined",
+        timestamp: Date.now(),
+        matchId: matchId,
+        userId: uid
+      };
+
+      return root; // ✅ commit
     });
 
-    if (!txn.committed) {
-      return res.json({ error: errorCode || "JOIN_FAILED" });
-    }
+    /* ======================================================
+    FINAL RESPONSE
+    ====================================================== */
 
-    // 4. Update User Wallet/History ONLY after slot is secured
-    // (Logic from your original wallet deduction goes here)
-    // ... update user wallet and myMatches ...
+    if (!txn.committed) {
+      // If transaction wasn't committed, there was a conflict
+      // Return the specific error or a generic one
+      return res.json({ 
+        error: finalError || "JOIN_FAILED_TRANSACTION_CONFLICT" 
+      });
+    }
 
     return res.json({ status: "SUCCESS" });
 
@@ -415,7 +501,6 @@ app.post("/join-matchh", verifyFirebaseToken, async (req, res) => {
     res.status(500).json({ error: "SERVER_ERROR" });
   }
 });
-
       
 /* ======================================================
 ADMIN UPDATE MATCH
