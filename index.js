@@ -355,73 +355,44 @@ res.status(500).send("Error");
 JOIN MATCH (RACE CONDITION SAFE)
 ====================================================== */
 
-app.post("/join-match", verifyFirebaseToken, async (req, res) => {
+        
+      
+      app.post("/join-match", verifyFirebaseToken, async (req, res) => {
   try {
     const uid = req.uid;
     const { matchId, ign } = req.body;
 
     if (!matchId || !ign) {
-      return res.json({ error: "INVALID_DATA" });
+      return res.status(400).json({ error: "INVALID_DATA" });
     }
 
-    let finalError = null;
-    let committed = false;
-
-    const txn = await db.ref().transaction((root) => {
+    const result = await db.ref().transaction((root) => {
       if (!root) return root;
 
       const match = root.matches?.upcoming?.[matchId];
       const user = root.users?.[uid];
 
-      /* ======================================================
-      VALIDATIONS (All must be inside transaction)
-      ====================================================== */
-
-      if (!match) {
-        finalError = "MATCH_NOT_FOUND";
-        return; // 🔴 abort
-      }
-
-      if (!user) {
-        finalError = "USER_NOT_FOUND";
-        return;
-      }
-
-      // Initialize players object if needed
-      if (!match.players) match.players = {};
-
+      // All validations - return null to abort transaction
+      if (!match) return null;
+      if (!user) return null;
+      
       // Check if already joined
-      if (match.players[uid]) {
-        finalError = "ALREADY_JOINED";
-        return;
-      }
-
+      if (match.players?.[uid]) return null;
+      
+      // CRITICAL: Use atomic check
       const slots = Number(match.slots || 100);
-      const currentPlayers = Object.keys(match.players).length;
+      const currentPlayers = match.players ? Object.keys(match.players).length : 0;
+      
+      if (currentPlayers >= slots) return null;
 
-      // CRITICAL: Check capacity BEFORE any modifications
-      if (currentPlayers >= slots) {
-        finalError = "MATCH_FULL";
-        return; // 🔴 critical abort - race condition protected
-      }
-
-      /* ======================================================
-      WALLET CHECK (Must use current values)
-      ====================================================== */
-
+      // Wallet check with atomic read
       let dep = Number(user.wallet?.deposited || 0);
       let win = Number(user.wallet?.winnings || 0);
       const entryFee = Number(match.matchDetails?.entryFee || 0);
 
-      if (dep + win < entryFee) {
-        finalError = "INSUFFICIENT_BALANCE";
-        return;
-      }
+      if (dep + win < entryFee) return null;
 
-      /* ======================================================
-      DEDUCTION LOGIC
-      ====================================================== */
-
+      // Deduction logic
       let depositUsed = 0;
       let winningsUsed = 0;
 
@@ -435,38 +406,28 @@ app.post("/join-match", verifyFirebaseToken, async (req, res) => {
         win -= winningsUsed;
       }
 
-      /* ======================================================
-      APPLY UPDATES (ATOMIC)
-      ====================================================== */
-
-      // wallet update
+      // Apply all updates atomically
       if (!root.users[uid].wallet) root.users[uid].wallet = {};
       root.users[uid].wallet.deposited = dep;
       root.users[uid].wallet.winnings = win;
 
-      // add player
+      if (!match.players) match.players = {};
       match.players[uid] = {
         ign,
         depositUsed,
         winningsUsed,
         joinedAt: Date.now()
       };
+      
+      // CORRECT: Recalculate from actual players object
+      match.joinedCount = Object.keys(match.players).length;
 
-      // joined count - use current players + 1 for accuracy
-      match.joinedCount = currentPlayers + 1;
-
-      // myMatches
       if (!root.users[uid].myMatches) root.users[uid].myMatches = {};
-      root.users[uid].myMatches[matchId] = {
-        joinedAt: Date.now()
-      };
+      root.users[uid].myMatches[matchId] = { joinedAt: Date.now() };
 
-      // save IGN globally
       root.users[uid].ign = ign;
 
-      // transaction log
       const publicMatchId = match.matchDetails?.matchId || matchId;
-
       if (!root.users[uid].transactions) root.users[uid].transactions = {};
       root.users[uid].transactions[`${publicMatchId}_${uid}_${Date.now()}`] = {
         transactionId: `${publicMatchId}_Join`,
@@ -479,18 +440,14 @@ app.post("/join-match", verifyFirebaseToken, async (req, res) => {
         userId: uid
       };
 
-      return root; // ✅ commit
+      return root;
     });
 
-    /* ======================================================
-    FINAL RESPONSE
-    ====================================================== */
-
-    if (!txn.committed) {
-      // If transaction wasn't committed, there was a conflict
-      // Return the specific error or a generic one
-      return res.json({ 
-        error: finalError || "JOIN_FAILED_TRANSACTION_CONFLICT" 
+    // Check transaction result
+    if (!result.committed || result.snapshot === null) {
+      return res.status(409).json({ 
+        error: "JOIN_FAILED",
+        details: "Match full, already joined, or insufficient balance"
       });
     }
 
